@@ -1,0 +1,23 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "TestPilot 示例 API", "version": "1.0.0"},
+  "servers": [{"url": "https://example.test/api"}],
+  "paths": {
+    "/pets/{petId}": {
+      "get": {
+        "tags": ["宠物"],
+        "summary": "查询宠物",
+        "parameters": [
+          {"name": "petId", "in": "path", "required": true, "schema": {"type": "integer"}, "example": 1}
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}}
+          }
+        }
+      }
+    }
+  }
+}
+
