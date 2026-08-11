@@ -68,3 +68,30 @@ def test_backend_source_auto_detects_aspnet(tmp_path):
     parser = BackendSourceParser()
     assert parser.detect(tmp_path) == "aspnet"
     assert parser.parse_directory(tmp_path).endpoints[0].path == "/health"
+    analysis = parser.analyze_directory(tmp_path)
+    assert analysis["summary"]["endpoint_count"] == 1
+    assert any(item["path"] == "HealthController.cs" for item in analysis["files"])
+    assert any(item["evidence_type"] == "endpoint_route" for item in analysis["evidence"])
+    _, workflow = parser.suggest_workflow(tmp_path)
+    assert workflow["review_status"] == "draft"
+    assert workflow["requires_confirmation"] is True
+    assert workflow["steps"][0]["kind"] == "http"
+
+
+def test_source_analysis_captures_methods_transactions_and_db_writes(tmp_path):
+    (tmp_path / "Demo.csproj").write_text("<Project />", encoding="utf-8")
+    (tmp_path / "OrderController.cs").write_text("""
+    public class OrderController {
+        public IActionResult Create() { return service.CreateOrder(); }
+    }
+    """, encoding="utf-8")
+    (tmp_path / "OrderService.cs").write_text("""
+    public class OrderService {
+        [Transactional]
+        public void CreateOrder() { INSERT INTO orders (state) VALUES ('draft'); repository.Save(); }
+    }
+    """, encoding="utf-8")
+    analysis = BackendSourceParser().analyze_directory(tmp_path)
+    assert any(item["symbol_type"] == "method" for item in analysis["symbols"])
+    assert any(item["edge_type"] == "writes" and item["target_symbol"] == "db:orders" for item in analysis["edges"])
+    assert any(item["evidence_type"] == "transaction_boundary" for item in analysis["evidence"])

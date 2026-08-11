@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import copy
 import base64
+from datetime import datetime
 from collections import Counter
 from typing import Callable
 from threading import Event
@@ -17,6 +18,7 @@ from testpilot.engines.variables import extract_values, resolve
 def run_cases(cases: list[dict], base_url: str, common_headers: dict | None = None,
               on_result: Callable[[dict], None] | None = None, variables: dict | None = None,
               stop_event: Event | None = None, max_workers: int = 1) -> tuple[list[dict], dict]:
+    started_at = datetime.now().isoformat(timespec="seconds")
     cases = _expand_data_sets(cases)
     if max_workers > 1 and all(_parallel_safe(case) for case in cases):
         results = []
@@ -30,7 +32,7 @@ def run_cases(cases: list[dict], base_url: str, common_headers: dict | None = No
                 results.extend(item_results)
                 if on_result:
                     on_result(item_results[0])
-        return results, _summary(results)
+        summary = _summary(results); summary.update(started_at=started_at, finished_at=datetime.now().isoformat(timespec="seconds")); return results, summary
     results = []
     runtime_variables = dict(variables or {})
     statuses: dict[str, str] = {}
@@ -115,7 +117,7 @@ def run_cases(cases: list[dict], base_url: str, common_headers: dict | None = No
         statuses[str(case.get("id", case_id))] = result["status"]
         if on_result:
             on_result(result)
-    return results, _summary(results)
+    summary = _summary(results); summary.update(started_at=started_at, finished_at=datetime.now().isoformat(timespec="seconds")); return results, summary
 
 
 def _summary(results: list[dict]) -> dict:

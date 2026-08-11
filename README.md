@@ -27,6 +27,8 @@ pytest
 
 ## 当前范围
 
+> 说明：当前路线 A 是“源码证据 + 基础业务流程执行”原型，不等于完整的隐藏工艺覆盖；多数据库、消息/第三方副作用观测、运行时链路和 AI 受控对话按 [V4.0 落地规划](docs/project-plan-v4.0.md) 分阶段实现。
+
 - 创建、选择和删除测试项目
 - 保存多套测试环境
 - 导入 OpenAPI 3.x、Swagger 2.0 JSON/YAML、Postman Collection v2.1、cURL 和 HAR
@@ -41,9 +43,12 @@ pytest
 - 请求结果展示与敏感字段脱敏
 - SQLite 保存用例、运行结果和报告记录
 - 导出独立 HTML/JSON 测试报告
+- 源码方法/事务/SQL 写入证据、运行时 Trace、A/B 差异报告和脱敏可重放测试包
+- SQLite schema 观测及可选 PostgreSQL/MySQL DB-API 适配器（需项目自行安装驱动）
 
 详细能力边界与验收状态见 [第一阶段验收清单](docs/phase1-acceptance.md)，操作流程见
-[使用说明](docs/user-guide.md)。
+[使用说明](docs/user-guide.md)，当前项目规划基线见
+[V4.0 落地规划](docs/project-plan-v4.0.md)。
 
 ## Windows 构建
 
