@@ -1,0 +1,7 @@
+services:
+  testpilot-runner:
+    build: .
+    volumes:
+      - ./data:/data
+    command: ["schedule", "--poll-seconds", "30"]
+    restart: unless-stopped

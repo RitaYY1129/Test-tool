@@ -41,7 +41,7 @@ TEST_GENERATION_SCHEMA = {
 
 
 def validate_generation(value: dict, endpoint_keys: set[str] | None = None) -> None:
-    from jsonschema import validate
+    from testpilot.common.schema_validation import validate
 
     validate(value, TEST_GENERATION_SCHEMA)
     if endpoint_keys is not None:
@@ -52,4 +52,3 @@ def validate_generation(value: dict, endpoint_keys: set[str] | None = None) -> N
             if case["request"]["method"] in {"POST", "PUT", "PATCH", "DELETE"}:
                 case["risk"] = "high"
                 case["review_status"] = "draft"
-

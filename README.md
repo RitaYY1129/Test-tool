@@ -8,9 +8,11 @@
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+pip install -e ".[desktop,dev]"
 testpilot-ai
 ```
+
+桌面版依赖 PySide6，请使用 Python 3.12 或 3.13；当前 Python 3.14 可用于无界面 CLI、定时任务和 CI/CD，但不能安装桌面 UI 依赖。
 
 也可以执行：
 
@@ -24,6 +26,17 @@ python -m testpilot.main
 ```powershell
 pytest
 ```
+
+## 自动化交付闭环
+
+桌面端负责导入、环境与用例管理；新增无界面执行器用于定时回归、Docker 和 CI/CD。它支持失败重试、企业微信/钉钉 Webhook 或 SMTP 失败通知、历史通过率趋势 JSON，以及 HTML/JSON 报告。
+
+```powershell
+testpilot-run --db .\data\testpilot.db run --project 1 --environment "测试环境" --retries 2
+testpilot-run --db .\data\testpilot.db schedule
+```
+
+部署、通知配置、Docker 和演示流程见 [部署说明](docs/deployment.md)。
 
 ## 当前范围
 

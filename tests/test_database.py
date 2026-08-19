@@ -24,6 +24,21 @@ def test_delete_empty_sources(tmp_path):
     assert db.list_sources(project_id) == []
 
 
+def test_data_flow_duplicate_nodes_are_deduplicated_and_source_can_be_deleted(tmp_path):
+    db = Database(tmp_path / "test.db")
+    project_id = db.create_project("flow")
+    model_id = db.save_data_flow_model(project_id, "flow", {"nodes": [
+        {"key": "db", "kind": "database", "name": "first"},
+        {"key": "db", "kind": "database", "name": "last"},
+    ], "edges": []})
+    model = db.get_data_flow_model(model_id)
+    assert len(model["nodes"]) == 1
+    with db.connect() as connection:
+        source_id = connection.execute("INSERT INTO api_sources(project_id,name,kind) VALUES (?,?,?)", (project_id, "spec", "openapi")).lastrowid
+    db.delete_source(source_id, project_id)
+    assert db.list_sources(project_id) == []
+
+
 def test_route_a_schema_and_source_analysis_are_persisted(tmp_path):
     db = Database(tmp_path / "test.db")
     project_id = db.create_project("route-a")
@@ -45,8 +60,8 @@ def test_route_a_schema_and_source_analysis_are_persisted(tmp_path):
     assert db.list_analysis_edges(run_id)[0]["target_symbol"] == "UserService"
     assert db.list_analysis_evidence(run_id)[0]["evidence_type"] == "endpoint_route"
     with db.connect() as connection:
-            assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+            assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 10
     # Re-opening the same legacy-compatible database must not duplicate the migration.
     Database(tmp_path / "test.db")
     with db.connect() as connection:
-            assert connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 9
+            assert connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 10

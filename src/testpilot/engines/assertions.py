@@ -19,7 +19,7 @@ def evaluate(assertion: dict, status_code: int, elapsed_ms: int, body: Any) -> d
         operator = assertion.get("operator", "equals")
         passed = actual == expected if operator == "equals" else actual not in (None, "", [], {}) if operator == "not_empty" else False
     elif kind == "response_schema":
-        from jsonschema import validate
+        from testpilot.common.schema_validation import validate
         actual = body
         try:
             validate(body, expected)

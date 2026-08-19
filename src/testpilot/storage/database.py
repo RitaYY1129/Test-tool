@@ -431,6 +431,20 @@ class Database:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """,
+            10: """
+                CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    environment_name TEXT NOT NULL,
+                    interval_minutes INTEGER NOT NULL DEFAULT 60,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    notification_json TEXT NOT NULL DEFAULT '{}',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    next_run_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_run_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """,
         }
         for version in sorted(migrations):
             if version <= current:
@@ -505,11 +519,17 @@ class Database:
                 (project_id, name, document.endpoints[0].source if document.endpoints else "openapi", json.dumps(metadata, ensure_ascii=False)),
             )
             source_id = int(cur.lastrowid)
+            # Source-code parsers can discover the same route through more than
+            # one controller declaration. Keep the first method/path pair so a
+            # malformed or duplicated source cannot abort the whole import.
+            endpoints = {}
+            for endpoint in document.endpoints:
+                endpoints.setdefault((endpoint.method, endpoint.path), endpoint)
             db.executemany(
                 "INSERT INTO api_endpoints(source_id,method,path,module,summary,definition_json) VALUES (?,?,?,?,?,?)",
                 [
                     (source_id, e.method, e.path, e.module, e.summary, json.dumps(e.to_dict(), ensure_ascii=False))
-                    for e in document.endpoints
+                    for e in endpoints.values()
                 ],
             )
             db.execute("UPDATE projects SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (project_id,))
@@ -641,7 +661,11 @@ class Database:
                              source_analysis_run_id: int | None = None,
                              workflow_id: int | None = None) -> int:
         """Persist a versioned visible/hidden data-flow graph."""
-        nodes = definition.get("nodes") or []
+        # A workflow may refer to the same service/database node from multiple
+        # steps. The graph table requires one row per key, so keep the last
+        # complete definition instead of failing with a SQLite UNIQUE error.
+        node_map = {str(node.get("key", "")): node for node in (definition.get("nodes") or []) if node.get("key")}
+        nodes = list(node_map.values())
         edges = definition.get("edges") or []
         with self.connect() as db:
             cur = db.execute(
@@ -665,6 +689,18 @@ class Database:
                   str(edge.get("kind", "calls")), json.dumps(edge, ensure_ascii=False)) for edge in edges],
             )
             return model_id
+
+    def delete_source(self, source_id: int, project_id: int) -> None:
+        """Delete one imported material source, scoped to its owning project."""
+        with self.connect() as db:
+            db.execute("DELETE FROM api_sources WHERE id=? AND project_id=?", (source_id, project_id))
+
+    def rename_source(self, source_id: int, project_id: int, name: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE api_sources SET name=? WHERE id=? AND project_id=?",
+                (name.strip(), source_id, project_id),
+            )
 
     def list_data_flow_models(self, project_id: int) -> list[dict]:
         with self.connect() as db:
@@ -1006,15 +1042,26 @@ class Database:
                    WHERE wr.project_id=? ORDER BY r.id DESC""", (project_id,)
             )]
 
-    def list_endpoints(self, project_id: int) -> list[dict]:
+    def list_endpoints(self, project_id: int, route: str | None = None) -> list[dict]:
+        """List project endpoints, optionally limited to a testing route.
+
+        Route A only consumes endpoints discovered from imported source code.
+        Route B consumes imported API documents and manually maintained assets.
+        Keeping the distinction here prevents UI pages from accidentally mixing
+        data from the two workflows.
+        """
+        sql = """SELECT e.id,e.method,e.path,e.module,e.summary,e.definition_json,
+                        s.id AS source_id,s.name AS source_name,s.kind AS source_kind
+                 FROM api_endpoints e JOIN api_sources s ON s.id=e.source_id
+                 WHERE s.project_id=?"""
+        values: list[object] = [project_id]
+        if route == "route_a":
+            sql += " AND s.kind = 'source_code'"
+        elif route == "route_b":
+            sql += " AND (s.kind IS NULL OR s.kind <> 'source_code')"
+        sql += " ORDER BY e.module,e.path,e.method"
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT e.id,e.method,e.path,e.module,e.summary,e.definition_json,
-                          s.id AS source_id,s.name AS source_name,s.kind AS source_kind
-                   FROM api_endpoints e JOIN api_sources s ON s.id=e.source_id
-                   WHERE s.project_id=? ORDER BY e.module,e.path,e.method""",
-                (project_id,),
-            )
+            rows = db.execute(sql, values)
             return [dict(row) for row in rows]
 
     def list_sources(self, project_id: int) -> list[dict]:
@@ -1108,6 +1155,46 @@ class Database:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM test_runs WHERE project_id=? ORDER BY id DESC", (project_id,)
             )]
+
+    def trend_summary(self, project_id: int, limit: int = 20) -> list[dict]:
+        """Recent runs for a compact pass-rate/failure trend chart or CI UI."""
+        with self.connect() as db:
+            rows = db.execute("SELECT id,started_at,finished_at,summary_json FROM test_runs WHERE project_id=? AND status='completed' ORDER BY id DESC LIMIT ?", (project_id, limit)).fetchall()
+        return [{"run_id": row["id"], "started_at": row["started_at"], **json.loads(row["summary_json"])} for row in reversed(rows)]
+
+    def save_schedule(self, project_id: int, environment_name: str, interval_minutes: int,
+                      retry_count: int = 0, notification: dict | None = None) -> int:
+        if interval_minutes < 1 or retry_count < 0:
+            raise ValueError("定时间隔至少为 1 分钟，重试次数不能为负数")
+        with self.connect() as db:
+            cur = db.execute("INSERT INTO scheduled_tasks(project_id,environment_name,interval_minutes,retry_count,notification_json) VALUES (?,?,?,?,?)", (project_id, environment_name, interval_minutes, retry_count, json.dumps(notification or {}, ensure_ascii=False)))
+            return int(cur.lastrowid)
+
+    def list_due_schedules(self) -> list[dict]:
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM scheduled_tasks WHERE enabled=1 AND datetime(next_run_at) <= datetime('now') ORDER BY id")]
+
+    def list_schedules(self, project_id: int | None = None) -> list[dict]:
+        query = "SELECT * FROM scheduled_tasks"
+        params: tuple = ()
+        if project_id is not None:
+            query += " WHERE project_id=?"
+            params = (project_id,)
+        query += " ORDER BY id DESC"
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(query, params)]
+
+    def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE scheduled_tasks SET enabled=? WHERE id=?", (int(enabled), schedule_id))
+
+    def delete_schedule(self, schedule_id: int) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM scheduled_tasks WHERE id=?", (schedule_id,))
+
+    def complete_schedule(self, schedule_id: int) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE scheduled_tasks SET last_run_at=CURRENT_TIMESTAMP, next_run_at=datetime('now', '+' || interval_minutes || ' minutes') WHERE id=?", (schedule_id,))
 
     def audit(self, project_id: int | None, action: str, details: dict | None = None) -> None:
         with self.connect() as db:

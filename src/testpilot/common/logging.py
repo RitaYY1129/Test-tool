@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def configure_logging(directory: str | Path) -> Path:
-    target = Path(directory)
+    target = Path(directory) 
     target.mkdir(parents=True, exist_ok=True)
     log_path = target / "testpilot.log"
     root = logging.getLogger()

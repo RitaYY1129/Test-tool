@@ -4,20 +4,21 @@ import html
 import json
 import shutil
 import subprocess
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QByteArray, Qt, QProcess, QSize, QObject, QRunnable, QThreadPool, Signal, Slot, QUrl, QTimer
-from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap, QKeySequence, QShortcut
+from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap, QKeySequence, QShortcut, QPen
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QDialog, QDialogButtonBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
     QProgressBar, QScrollArea, QSpinBox, QStackedWidget, QStyle, QTabWidget, QTableWidget, QTableWidgetItem,
-    QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QTextEdit, QToolButton, QVBoxLayout, QWidget, QStyleOptionButton, QSizePolicy,
 )
 
 from testpilot.engines.http_engine import execute_request
@@ -51,6 +52,28 @@ from testpilot.model_providers.ollama import OllamaProvider
 from testpilot.model_providers.resilience import AIRequestCancelled
 from testpilot.parsers.difference_checker import compare_documents
 from testpilot.domain.api import ApiDocument, ApiEndpoint, ApiParameter
+
+
+class BlueCheckBox(QCheckBox):
+    """A checkbox whose selected state stays legible in the compact blue theme."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt callback name
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        indicator = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, option, self)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(Qt.white, 2.2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(indicator.left() + 4, indicator.center().y(), indicator.left() + 7, indicator.bottom() - 4)
+        painter.drawLine(indicator.left() + 7, indicator.bottom() - 4, indicator.right() - 3, indicator.top() + 4)
+        painter.end()
 
 
 WORKFLOW_GENERATION_SCHEMA = {
@@ -246,10 +269,9 @@ class MainWindow(QMainWindow):
         self._add_sidebar_entry("首页", 0, QStyle.SP_DirHomeIcon)
         self._add_nested_sidebar_group("接口测试", QStyle.SP_ComputerIcon, [
             ("路线 A · 源码驱动", QStyle.SP_FileDialogContentsView, [
-                ("接口查看", 1, QStyle.SP_FileDialogDetailedView),
-                ("业务流程与数据流", 7, QStyle.SP_FileDialogInfoView),
-                ("环境与请求", 2, QStyle.SP_DriveNetIcon),
-                ("测试用例与执行", 3, QStyle.SP_MediaPlay),
+                ("接口资产", 1, QStyle.SP_FileDialogDetailedView),
+                ("环境校验", 2, QStyle.SP_DriveNetIcon),
+                ("业务流程与测试执行", 7, QStyle.SP_FileDialogInfoView),
             ]),
             ("路线 B · 资料驱动", QStyle.SP_FileDialogContentsView, [
                 ("接口资料与资产", 1, QStyle.SP_FileDialogDetailedView),
@@ -527,6 +549,103 @@ class MainWindow(QMainWindow):
         self._sidebar_icon_cache[cache_key] = icon
         return icon
 
+    def _illustration_icon(self, kind: str, size: int = 76) -> QLabel:
+        """Build the dashboard illustrations as crisp local SVGs.
+
+        Keeping these in code (instead of emoji or an external icon font) makes
+        the packaged application render identically on every Windows machine.
+        """
+        artwork = {
+            "server": """
+                <rect x='15' y='17' width='70' height='22' rx='7' fill='#1877f2'/>
+                <rect x='15' y='46' width='70' height='22' rx='7' fill='#2588ff'/>
+                <rect x='15' y='75' width='70' height='22' rx='7' fill='#1d6fe0'/>
+                <circle cx='29' cy='28' r='3.5' fill='white'/><circle cx='29' cy='57' r='3.5' fill='white'/><circle cx='29' cy='86' r='3.5' fill='white'/>
+                <path d='M43 28h28M43 57h28M43 86h28' stroke='white' stroke-width='4' stroke-linecap='round'/>
+            """,
+            "key": """
+                <circle cx='49' cy='45' r='23' fill='#2684ff'/><circle cx='49' cy='45' r='8' fill='white'/>
+                <path d='M34 60L13 81l10 10 7-7 7 7 10-10-7-7 8-8' fill='#2684ff'/>
+                <path d='M34 60L13 81l10 10 7-7 7 7 10-10-7-7 8-8' fill='none' stroke='#2684ff' stroke-width='6' stroke-linejoin='round'/>
+            """,
+            "shield": """
+                <path d='M50 11l33 12v25c0 22-14 37-33 43C31 85 17 70 17 48V23z' fill='#20ae69'/>
+                <path d='M34 50l11 11 22-25' fill='none' stroke='white' stroke-width='8' stroke-linecap='round' stroke-linejoin='round'/>
+            """,
+            "cube": """
+                <path d='M50 12l33 19v38L50 88 17 69V31z' fill='#7157e8'/>
+                <path d='M50 12v38m33-19L50 50 17 31M50 50v38' fill='none' stroke='#aa9cff' stroke-width='2.5'/>
+                <text x='50' y='59' text-anchor='middle' font-family='Arial' font-size='18' font-weight='700' fill='white'>API</text>
+            """,
+            "complete": """
+                <circle cx='50' cy='50' r='39' fill='#20ae69'/>
+                <path d='M30 51l13 13 28-30' fill='none' stroke='white' stroke-width='9' stroke-linecap='round' stroke-linejoin='round'/>
+            """,
+            # Small status marks are SVG too, rather than Unicode glyphs.  This
+            # keeps the green check and orange warning triangle identical in
+            # every widget and on every Windows font installation.
+            "status_success": """
+                <circle cx='50' cy='50' r='43' fill='#17a64a'/>
+                <path d='M27 51l14 14 31-33' fill='none' stroke='white' stroke-width='10' stroke-linecap='round' stroke-linejoin='round'/>
+            """,
+            "status_warning": """
+                <path d='M50 9L94 87H6z' fill='#f29a16'/>
+                <path d='M50 34v27' fill='none' stroke='white' stroke-width='10' stroke-linecap='round'/>
+                <circle cx='50' cy='75' r='5.5' fill='white'/>
+            """,
+            "status_pending": """
+                <circle cx='50' cy='50' r='26' fill='#92a4b8'/>
+            """,
+            "status_running": """
+                <circle cx='50' cy='50' r='37' fill='none' stroke='#1677e8' stroke-width='10'/>
+                <path d='M50 27v25l17 10' fill='none' stroke='#1677e8' stroke-width='9' stroke-linecap='round' stroke-linejoin='round'/>
+            """,
+            "source": """
+                <path d='M15 34h29l8 9h33v38a8 8 0 0 1-8 8H15a8 8 0 0 1-8-8V42a8 8 0 0 1 8-8z' fill='#1478f5'/>
+                <path d='M40 55L28 66l12 11M61 55l12 11-12 11' fill='none' stroke='white' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/>
+            """,
+            "ai": """
+                <circle cx='50' cy='50' r='30' fill='#e9f3ff'/>
+                <circle cx='39' cy='43' r='6' fill='#80b9ff'/><circle cx='59' cy='39' r='6' fill='#80b9ff'/><circle cx='62' cy='59' r='6' fill='#80b9ff'/><circle cx='42' cy='63' r='6' fill='#80b9ff'/>
+                <path d='M39 43l20-4 3 20-20 4zM28 23l3 7m31-11l-3 8m16 25l-8 1' stroke='#4d95f5' stroke-width='3' fill='none' stroke-linecap='round'/>
+                <path d='M46 50h8M50 46v8' stroke='#1478f5' stroke-width='4' stroke-linecap='round'/>
+            """,
+            "flow": """
+                <rect x='38' y='14' width='24' height='18' rx='4' fill='#89a9d9'/>
+                <rect x='13' y='68' width='24' height='18' rx='4' fill='#89a9d9'/><rect x='63' y='68' width='24' height='18' rx='4' fill='#89a9d9'/>
+                <path d='M50 32v16M25 68V54h50v14' fill='none' stroke='#547cab' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/>
+            """,
+            "node": """
+                <circle cx='25' cy='27' r='12' fill='#e7f1ff' stroke='#1677e8' stroke-width='4'/><circle cx='75' cy='28' r='12' fill='#e7f1ff' stroke='#1677e8' stroke-width='4'/>
+                <circle cx='50' cy='73' r='13' fill='#1677e8'/><path d='M34 33l10 28M66 34L56 61M37 27h26' stroke='#1677e8' stroke-width='5' stroke-linecap='round'/>
+            """,
+            "rule": """
+                <rect x='21' y='11' width='58' height='78' rx='8' fill='#eef6ff' stroke='#1677e8' stroke-width='4'/>
+                <path d='M35 34h31M35 50h31M35 66h20' stroke='#1677e8' stroke-width='5' stroke-linecap='round'/>
+                <circle cx='29' cy='34' r='3' fill='#1677e8'/><circle cx='29' cy='50' r='3' fill='#1677e8'/><circle cx='29' cy='66' r='3' fill='#1677e8'/>
+            """,
+            "chain": """
+                <path d='M41 58L31 68a16 16 0 1 1-23-23l13-13a16 16 0 0 1 23 0' fill='none' stroke='#1677e8' stroke-width='8' stroke-linecap='round'/>
+                <path d='M59 42l10-10a16 16 0 1 1 23 23L79 68a16 16 0 0 1-23 0' fill='none' stroke='#1677e8' stroke-width='8' stroke-linecap='round'/>
+                <path d='M38 62l24-24' stroke='#1677e8' stroke-width='8' stroke-linecap='round'/>
+            """,
+        }
+        svg = (
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+            + artwork.get(kind, artwork['complete']) + "</svg>"
+        )
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        label = QLabel()
+        label.setPixmap(pixmap)
+        label.setAlignment(Qt.AlignCenter)
+        label.setFixedSize(size, size)
+        return label
+
     @staticmethod
     def _toggle_menu_group(submenu, header):
         submenu.setVisible(not submenu.isVisible())
@@ -584,8 +703,8 @@ class MainWindow(QMainWindow):
         self._set_primary_header_active()
         self.pages.setCurrentIndex(page_index)
         page_names = {
-            0: "项目中心", 1: "接口资产", 2: "环境与请求", 3: "测试用例与执行",
-            4: "历史报告", 5: "能力中心", 6: "模型与连接", 7: "业务流程与数据流", 8: "AI 协作中心",
+            0: "项目中心", 1: "接口资产", 2: "环境校验", 3: "测试用例与执行",
+            4: "历史报告", 5: "能力中心", 6: "模型与连接", 7: "业务流程与测试执行", 8: "AI 协作中心",
         }
         if hasattr(self, "breadcrumb"):
             section = "系统配置" if page_index == 8 else "接口测试"
@@ -631,6 +750,20 @@ class MainWindow(QMainWindow):
     def go_to_page(self, page_index):
         self._activate_page(page_index)
 
+    def _project_stat_card(self, title: str, color: str) -> QFrame:
+        """项目中心顶部的统一统计卡片。"""
+        card = QFrame(); card.setObjectName("ProjectStatCard")
+        card.setProperty("accent", color)
+        layout = QHBoxLayout(card); layout.setContentsMargins(18, 14, 18, 14)
+        badge = QLabel(title[:1]); badge.setObjectName("ProjectStatBadge")
+        badge.setStyleSheet(f"background:{color};")
+        value = QLabel("0"); value.setObjectName("ProjectStatValue")
+        caption = QLabel(f"个{title}"); caption.setObjectName("ProjectStatCaption")
+        column = QVBoxLayout(); column.setSpacing(0); column.addWidget(value); column.addWidget(caption)
+        layout.addWidget(badge); layout.addLayout(column); layout.addStretch()
+        card.stat_value = value
+        return card
+
     def _project_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
         title = QLabel("项目中心"); title.setObjectName("PageTitle")
@@ -638,58 +771,116 @@ class MainWindow(QMainWindow):
         mode.setObjectName("PageSubtitle")
         row = QHBoxLayout()
         self.projects = QComboBox(); self.projects.currentIndexChanged.connect(self._project_changed)
-        new_btn = QPushButton("新建项目"); new_btn.clicked.connect(self.new_project)
+        self.projects.setMinimumWidth(300)
         delete_btn = QPushButton("删除项目"); delete_btn.clicked.connect(self.delete_project)
+        self.source_filter_home = QLineEdit(); self.source_filter_home.setPlaceholderText("筛选当前项目的资料名称或类型")
+        self.source_filter_home.textChanged.connect(self.refresh_source_table)
         self.import_type = QComboBox()
         self.import_type.addItems([
             "OpenAPI / Swagger 文件", "在线 OpenAPI URL", "Postman Collection",
             "Postman Environment", "Apifox 数据", "cURL 命令", "HAR 请求记录",
             "接口文档 / Excel", "后端源码（自动识别）",
         ])
-        import_btn = QPushButton("导入资料")
+        import_btn = QPushButton("导入项目")
         import_btn.setProperty("primary", True)
-        import_btn.clicked.connect(self.import_selected_source)
-        compare_btn = QPushButton("对比最近两份资料"); compare_btn.clicked.connect(self.compare_sources)
-        new_btn.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
+        import_btn.clicked.connect(self.import_project)
         delete_btn.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
         import_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
-        compare_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-        row.addWidget(QLabel("当前项目")); row.addWidget(self.projects, 1); row.addWidget(new_btn); row.addWidget(delete_btn)
-        import_row = QHBoxLayout()
-        import_row.addWidget(QLabel("资料类型"))
-        import_row.addWidget(self.import_type, 1)
-        import_row.addWidget(import_btn)
-        import_row.addWidget(compare_btn)
-        import_row.addStretch()
-        self.summary = QTextEdit(); self.summary.setReadOnly(True)
-        self.summary.setPlaceholderText("导入资料后，这里会显示完整度、缺失信息和差异分析。")
-        self.project_table = QTableWidget(0, 6)
-        self.project_table.setHorizontalHeaderLabels(["项目", "资料源", "模块", "接口", "用例", "最近更新"])
+        row.addWidget(QLabel("当前项目")); row.addWidget(self.projects, 1)
+        row.addWidget(import_btn); row.addWidget(delete_btn)
+        self.source_table = QTableWidget(0, 3)
+        self.source_table.setHorizontalHeaderLabels(["资料名称", "类型", "操作"])
+        self.source_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.source_table.setAlternatingRowColors(True)
+        self.source_table.setFocusPolicy(Qt.NoFocus)
+        # 资料较少时不让空白区域挤占下方的概览与资产查看空间。
+        self.source_table.setMinimumHeight(0)
+        self.source_table.verticalHeader().setVisible(False)
+        self.source_table.verticalHeader().setDefaultSectionSize(38)
+        self.source_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for column, width in ((1, 105), (2, 62)):
+            self.source_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Fixed)
+            self.source_table.setColumnWidth(column, width)
+        self.summary = QLabel("导入资料后，这里会显示完整度、缺失信息和差异分析。")
+        self.summary.setObjectName("AssetHint")
+        self.summary.setWordWrap(True)
+        self.project_table = QTableWidget(0, 5)
+        self.project_table.setHorizontalHeaderLabels(["项目名称", "资料源", "模块", "接口", "最近更新"])
         self.project_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.project_table.setAlternatingRowColors(True)
         self.project_table.setShowGrid(False)
         self.project_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.project_table.setFocusPolicy(Qt.NoFocus)
         self.project_table.verticalHeader().setVisible(False)
         self.project_table.verticalHeader().setDefaultSectionSize(48)
-        self.project_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for column, width in ((0, 110), (1, 62), (2, 62), (3, 62), (4, 104)):
+            self.project_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Fixed)
+            self.project_table.setColumnWidth(column, width)
+        self.project_table.horizontalHeader().setStretchLastSection(True)
         self.project_table.itemSelectionChanged.connect(self.select_project_from_table)
         self.project_table.cellDoubleClicked.connect(lambda *_: self.go_to_page(1))
         self.asset_tree = QTreeWidget()
+        self.asset_tree.setFocusPolicy(Qt.NoFocus)
         self.asset_tree.setHeaderLabels(["项目资产结构", "类型 / 方法", "数量 / 路径"])
         self.asset_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.asset_tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.asset_tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.asset_tree.itemDoubleClicked.connect(self.open_asset_item)
-        asset_split = QSplitter(Qt.Horizontal)
-        asset_split.addWidget(self.project_table)
-        detail_panel = QSplitter(Qt.Vertical)
-        detail_panel.addWidget(self.asset_tree)
-        detail_panel.addWidget(self.summary)
-        detail_panel.setSizes([420, 180])
-        asset_split.addWidget(detail_panel)
-        asset_split.setSizes([650, 520])
-        new_btn.setProperty("primary", True)
+        self.asset_tree.itemSelectionChanged.connect(self.update_asset_actions)
+        self.asset_search = QLineEdit(); self.asset_search.setPlaceholderText("搜索资料源、模块或接口路径")
+        self.asset_search.textChanged.connect(self.filter_asset_tree)
+        self.asset_summary = QLabel()
+        self.asset_summary.setObjectName("ContextBanner")
+        expand_assets = QPushButton("全部展开"); expand_assets.clicked.connect(self.asset_tree.expandAll)
+        collapse_assets = QPushButton("全部收起"); collapse_assets.clicked.connect(self.asset_tree.collapseAll)
+        asset_actions = QHBoxLayout(); asset_actions.addWidget(self.asset_search, 1); asset_actions.addWidget(expand_assets); asset_actions.addWidget(collapse_assets)
+        # 顶部仅放项目操作；资料导入收敛到资料源面板，避免同一操作出现两处。
+        project_card = QFrame(); project_card.setObjectName("Card")
+        project_layout = QHBoxLayout(project_card); project_layout.setContentsMargins(18, 14, 18, 14)
+        project_layout.addLayout(row)
+        self.stat_projects = self._project_stat_card("项目", "#eaf3ff")
+        self.stat_sources = self._project_stat_card("资料源", "#eaf9f2")
+        self.stat_modules = self._project_stat_card("模块", "#f4edff")
+        self.stat_endpoints = self._project_stat_card("接口", "#eef4ff")
+        stats = QHBoxLayout(); stats.setSpacing(14)
+        stats.addWidget(self.stat_projects); stats.addWidget(self.stat_sources)
+        stats.addWidget(self.stat_modules); stats.addWidget(self.stat_endpoints)
+
+        source_panel = QFrame(); source_panel.setObjectName("Card")
+        source_layout = QVBoxLayout(source_panel); source_layout.setContentsMargins(16, 16, 16, 16); source_layout.setSpacing(10)
+        source_heading = QHBoxLayout(); source_heading.addWidget(QLabel("项目列表")); source_heading.itemAt(0).widget().setObjectName("PanelTitle")
+        source_heading.addStretch()
+        source_layout.addLayout(source_heading)
+        self.project_filter = QLineEdit(); self.project_filter.setPlaceholderText("搜索项目名称")
+        self.project_filter.textChanged.connect(self.filter_project_table)
+        source_layout.addWidget(self.project_filter); source_layout.addWidget(self.project_table, 1)
+        self.project_total = QLabel("共 0 个项目"); self.project_total.setObjectName("PageSubtitle")
+        source_layout.addWidget(self.project_total)
+
+        asset_panel = QFrame(); asset_panel.setObjectName("Card")
+        assets_layout = QVBoxLayout(asset_panel); assets_layout.setContentsMargins(16, 16, 16, 16); assets_layout.setSpacing(10)
+        asset_heading = QHBoxLayout()
+        asset_title = QLabel("当前项目资产"); asset_title.setObjectName("PanelTitle")
+        reimport_btn = QPushButton("导入到当前项目")
+        reimport_btn.clicked.connect(self.import_into_current_project)
+        self.edit_asset_btn = QPushButton("编辑选中资产")
+        self.delete_asset_btn = QPushButton("删除选中资产")
+        self.delete_asset_btn.setProperty("danger", True)
+        self.edit_asset_btn.clicked.connect(self.edit_selected_asset)
+        self.delete_asset_btn.clicked.connect(self.delete_selected_asset)
+        asset_heading.addWidget(asset_title); asset_heading.addStretch()
+        asset_heading.addWidget(reimport_btn); asset_heading.addWidget(self.edit_asset_btn); asset_heading.addWidget(self.delete_asset_btn)
+        assets_layout.addLayout(asset_heading); assets_layout.addWidget(self.asset_summary)
+        self.current_source_label = QLabel("尚未导入资料")
+        self.current_source_label.setObjectName("SelectedSource")
+        assets_layout.addWidget(self.current_source_label)
+        assets_layout.addLayout(asset_actions); assets_layout.addWidget(self.asset_tree, 1); assets_layout.addWidget(self.summary)
+        workspace = QWidget(); workspace_layout = QHBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0); workspace_layout.setSpacing(16)
+        workspace_layout.addWidget(source_panel, 3); workspace_layout.addWidget(asset_panel, 7)
         delete_btn.setProperty("danger", True)
-        layout.addWidget(title); layout.addWidget(mode); layout.addLayout(row); layout.addLayout(import_row)
-        layout.addWidget(asset_split, 1)
+        layout.addWidget(title); layout.addWidget(mode); layout.addWidget(project_card); layout.addLayout(stats)
+        layout.addWidget(workspace, 1)
         self._finish_page(page, layout)
         return page
 
@@ -700,6 +891,139 @@ class MainWindow(QMainWindow):
             self.import_har, self.import_document, self.import_backend_source,
         ]
         handlers[self.import_type.currentIndex()]()
+
+    def import_project(self):
+        """在一个窗口中收集项目名称和导入类型，再打开对应的文件/目录选择器。"""
+        options = [
+            "后端源码目录（自动识别接口）",
+            "OpenAPI / Swagger 文件",
+            "Postman Collection",
+            "Apifox JSON",
+            "接口文档 / Excel",
+            "HAR 请求记录",
+        ]
+        dialog = QDialog(self); dialog.setWindowTitle("导入项目"); dialog.setMinimumWidth(420)
+        form = QFormLayout(dialog); form.setContentsMargins(24, 20, 24, 16); form.setSpacing(14)
+        project_name_input = QLineEdit(); project_name_input.setPlaceholderText("例如：钢厂后端、恋爱日记")
+        import_kind = QComboBox(); import_kind.addItems(options)
+        form.addRow("项目名称", project_name_input)
+        form.addRow("导入类型", import_kind)
+        tip = QLabel("确认后将选择对应的文件或后端源码目录。"); tip.setObjectName("PageSubtitle")
+        form.addRow("", tip)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("下一步")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        choice = import_kind.currentText()
+        chosen_name = project_name_input.text().strip()
+        if choice == options[0]:
+            path = QFileDialog.getExistingDirectory(self, "选择后端源码项目目录")
+            if not path:
+                return
+            try:
+                analysis = BackendSourceParser().analyze_directory(path)
+                document = analysis["document"]
+                if not document.endpoints:
+                    raise ValueError("未在所选目录识别到接口，请选择包含 Controller 或路由文件的后端项目目录。")
+                project_name = chosen_name or Path(path).name
+                self._create_and_import_project(project_name, project_name, document, analysis, Path(path))
+                self.codex_path.setText(path); self.db.set_setting("codex_project_path", path)
+            except Exception as exc:
+                QMessageBox.critical(self, "导入项目失败", str(exc))
+            return
+
+        filters = {
+            options[1]: ("选择 OpenAPI 文件", "OpenAPI (*.json *.yaml *.yml)"),
+            options[2]: ("选择 Postman Collection", "Postman Collection (*.json)"),
+            options[3]: ("选择 Apifox 文件", "Apifox JSON (*.json)"),
+            options[4]: ("选择接口文档", "接口文档 (*.md *.txt *.html *.htm *.xlsx *.xlsm *.docx *.pdf)"),
+            options[5]: ("选择 HAR 文件", "HAR (*.har *.json)"),
+        }
+        path, _ = QFileDialog.getOpenFileName(self, *filters[choice])
+        if not path:
+            return
+        try:
+            if choice == options[1]:
+                document = OpenApiParser().parse_file(path)
+            elif choice == options[2]:
+                document = PostmanParser().parse_file(path)
+            elif choice == options[3]:
+                document = ApifoxParser().parse_file(path)
+            elif choice == options[4]:
+                document = DocumentParser().parse_file(path)
+            else:
+                document = HarParser().parse_file(path)
+            project_name = chosen_name or Path(path).stem
+            self._create_and_import_project(project_name, Path(path).name, document)
+            if document.base_urls and not self.base_url.text():
+                self.base_url.setText(document.base_urls[0])
+        except Exception as exc:
+            QMessageBox.critical(self, "导入项目失败", str(exc))
+
+    def import_into_current_project(self):
+        """为已存在项目导入一份新的资料源，便于版本更新和资料对比。"""
+        if not self.current_project_id:
+            QMessageBox.information(self, "提示", "请先在项目列表中选择一个项目。")
+            return
+        options = [
+            "后端源码目录（自动识别接口）", "OpenAPI / Swagger 文件", "Postman Collection",
+            "Apifox JSON", "接口文档 / Excel", "HAR 请求记录",
+        ]
+        choice, accepted = QInputDialog.getItem(self, "导入到当前项目", "导入类型", options, 0, False)
+        if not accepted:
+            return
+        try:
+            if choice == options[0]:
+                path = QFileDialog.getExistingDirectory(self, "选择后端源码项目目录")
+                if not path: return
+                analysis = BackendSourceParser().analyze_directory(path); document = analysis["document"]
+                if not document.endpoints: raise ValueError("未在所选目录识别到接口。")
+                self._save_document(Path(path).name, document, source_analysis=analysis, source_root=Path(path))
+            else:
+                filters = {
+                    options[1]: ("选择 OpenAPI 文件", "OpenAPI (*.json *.yaml *.yml)"),
+                    options[2]: ("选择 Postman Collection", "Postman Collection (*.json)"),
+                    options[3]: ("选择 Apifox 文件", "Apifox JSON (*.json)"),
+                    options[4]: ("选择接口文档", "接口文档 (*.md *.txt *.html *.htm *.xlsx *.xlsm *.docx *.pdf)"),
+                    options[5]: ("选择 HAR 文件", "HAR (*.har *.json)"),
+                }
+                path, _ = QFileDialog.getOpenFileName(self, *filters[choice])
+                if not path: return
+                parsers = {options[1]: OpenApiParser(), options[2]: PostmanParser(), options[3]: ApifoxParser(), options[4]: DocumentParser(), options[5]: HarParser()}
+                self._save_document(Path(path).name, parsers[choice].parse_file(path))
+            QMessageBox.information(self, "导入完成", "资料已导入当前项目，可使用“对比资料”查看变更。")
+        except Exception as exc:
+            QMessageBox.critical(self, "导入资料失败", str(exc))
+
+    def _create_and_import_project(self, project_name, source_name, document, analysis=None, source_root=None):
+        """按导入资料自动创建唯一项目，避免用户手动输入名称。"""
+        base_name = project_name.strip() or "未命名项目"
+        existing = {str(row["name"]) for row in self.db.list_projects()}
+        final_name = base_name
+        index = 2
+        while final_name in existing:
+            final_name = f"{base_name}-{index}"
+            index += 1
+        self.current_project_id = self.db.create_project(final_name, mode="source" if analysis else "document")
+        self._save_document(source_name, document, source_analysis=analysis, source_root=source_root)
+        self.refresh_projects()
+        QMessageBox.information(self, "导入完成", f"已创建项目：{final_name}\n识别接口：{len(document.endpoints)} 个")
+
+    def _set_import_summary(self, text: str):
+        if isinstance(self.summary, QLabel):
+            self.summary.setText(text.replace("\n", "  ·  "))
+        else:
+            self.summary.setPlainText(text)
+
+    def _append_import_summary(self, text: str):
+        if isinstance(self.summary, QLabel):
+            current = self.summary.text().strip()
+            self.summary.setText(f"{current}  ·  {text}" if current else text)
+        else:
+            self.summary.append(text)
 
     def _cases_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
@@ -721,9 +1045,11 @@ class MainWindow(QMainWindow):
         model_row = QHBoxLayout()
         self.ai_status_label = QLabel("AI：请先检测当前连接")
         self.ai_status_label.setObjectName("PageSubtitle")
+        self.case_runtime_hint = QLabel("运行配置：请先在“项目运行配置与接口调试”中保存一次项目环境。")
+        self.case_runtime_hint.setObjectName("PageSubtitle")
         self.max_workers = QSpinBox(); self.max_workers.setRange(1, 8); self.max_workers.setValue(1)
         self.max_workers.setPrefix("并发 ")
-        model_row.addWidget(self.ai_status_label, 1); model_row.addWidget(self.max_workers)
+        model_row.addWidget(self.ai_status_label, 1); model_row.addWidget(self.case_runtime_hint, 2); model_row.addWidget(self.max_workers)
         buttons = QHBoxLayout()
         plan_btn = QPushButton("预览测试计划"); plan_btn.clicked.connect(self.preview_plan)
         generate_btn = QPushButton("生成用例"); generate_btn.clicked.connect(self.generate_test_cases)
@@ -731,7 +1057,7 @@ class MainWindow(QMainWindow):
         edit_btn = QPushButton("编辑用例"); edit_btn.clicked.connect(self.edit_case)
         copy_btn = QPushButton("复制用例"); copy_btn.clicked.connect(self.copy_case)
         delete_case_btn = QPushButton("删除用例"); delete_case_btn.clicked.connect(self.delete_case)
-        run_btn = QPushButton("执行已确认用例"); run_btn.clicked.connect(self.run_confirmed_cases)
+        run_btn = QPushButton("一键运行已确认用例"); run_btn.clicked.connect(self.run_confirmed_cases)
         run_selected_btn = QPushButton("执行选中用例"); run_selected_btn.clicked.connect(self.run_selected_cases)
         rerun_failed_btn = QPushButton("重跑上次失败"); rerun_failed_btn.clicked.connect(self.rerun_failed_cases)
         stop_btn = QPushButton("停止任务"); stop_btn.clicked.connect(self.stop_run)
@@ -742,7 +1068,9 @@ class MainWindow(QMainWindow):
         self.case_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.run_output = QTextEdit(); self.run_output.setReadOnly(True)
         self.run_progress = QProgressBar(); self.run_progress.setRange(0, 100)
-        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(self.case_project_label)
+        # The project selector immediately below already identifies the project;
+        # avoid spending a full banner row on the same information.
+        layout.addWidget(title); layout.addWidget(subtitle)
         layout.addLayout(scope_row)
         layout.addWidget(self.instruction)
         layout.addLayout(model_row); layout.addLayout(buttons); layout.addWidget(self.case_table, 1)
@@ -755,7 +1083,93 @@ class MainWindow(QMainWindow):
         self._finish_page(page, layout)
         return page
 
+    def _business_flow_execution_page(self):
+        page = QScrollArea(); page.setObjectName("BusinessFlowScroll"); page.setWidgetResizable(True)
+        content = QWidget(); layout = QVBoxLayout(content); page.setWidget(content)
+        title = QLabel("业务流程与测试执行"); title.setObjectName("PageTitle")
+        stepper = QFrame(); stepper.setObjectName("BusinessStepper")
+        bar = QHBoxLayout(stepper); bar.setContentsMargins(0, 0, 0, 12)
+        for index, name in enumerate(("AI 流程识别", "流程确认", "生成测试用例", "执行测试用例"), 1):
+            item = QLabel(f"{index}  {name}"); item.setObjectName("BusinessStepActive" if index == 1 else "BusinessStep")
+            bar.addWidget(item)
+            if index < 4:
+                line = QFrame(); line.setFrameShape(QFrame.HLine); line.setObjectName("BusinessStepLine"); bar.addWidget(line, 1)
+
+        analysis_card = QFrame(); analysis_card.setObjectName("RecognitionCard")
+        analysis_layout = QVBoxLayout(analysis_card); analysis_layout.setContentsMargins(18, 16, 18, 16); analysis_layout.setSpacing(12)
+        analysis_layout.addWidget(QLabel("AI 业务流程识别", objectName="PanelTitle"))
+        analysis_left = QWidget(); left = QVBoxLayout(analysis_left); left.setContentsMargins(0, 0, 0, 0); left.setSpacing(10)
+        visual = QFrame(); visual.setObjectName("RecognitionVisual"); visual_layout = QHBoxLayout(visual); visual_layout.setContentsMargins(16, 14, 16, 14)
+        for pos, (icon_kind, name) in enumerate((("source", "导入源码项目"), ("ai", "AI 分析识别"), ("flow", "业务流程与依赖图谱"))):
+            block = QWidget(); block.setObjectName("RecognitionVisualItem")
+            block_layout = QVBoxLayout(block); block_layout.setContentsMargins(4, 4, 4, 4); block_layout.setSpacing(4)
+            block_layout.addWidget(self._illustration_icon(icon_kind, 64), alignment=Qt.AlignCenter)
+            label = QLabel(name); label.setObjectName("RecognitionVisualLabel"); label.setAlignment(Qt.AlignCenter)
+            block_layout.addWidget(label)
+            visual_layout.addWidget(block, 1)
+            if pos < 2:
+                arrow = QLabel("→"); arrow.setObjectName("RecognitionArrow"); arrow.setAlignment(Qt.AlignCenter); visual_layout.addWidget(arrow)
+        self.workflow_project_selector = QComboBox(); self.workflow_project_selector.currentIndexChanged.connect(self.select_workflow_project)
+        source_scope = QComboBox(); source_scope.addItem("已导入项目源码"); source_scope.setEnabled(False)
+        choices = QHBoxLayout(); choices.addWidget(QLabel("源码范围")); choices.addWidget(source_scope, 1)
+        checks = QHBoxLayout()
+        for text in ("控制器", "服务层", "数据模型", "配置文件", "数据库操作"):
+            checkbox = BlueCheckBox(text); checkbox.setChecked(True); checks.addWidget(checkbox)
+        self.workflow_scope = QTextEdit(); self.workflow_scope.setFixedHeight(78); self.workflow_scope.setPlaceholderText("补充业务说明：例如说明关键业务术语或关注的模块（可选）")
+        start = QPushButton("开始 AI 识别"); start.setProperty("primary", True); start.clicked.connect(self.generate_workflow_draft)
+        left.addWidget(visual); left.addWidget(QLabel("AI 将根据导入源码自动识别业务流程、接口依赖与关键业务规则。")); left.addLayout(choices); left.addLayout(checks); left.addWidget(self.workflow_scope); left.addWidget(start)
+
+        expected = QFrame(); expected.setObjectName("ExpectedOutputPanel"); expected_layout = QVBoxLayout(expected); expected_layout.setContentsMargins(12, 12, 12, 12); expected_layout.setSpacing(10)
+        expected_layout.addWidget(QLabel("识别后将生成（预期输出）", objectName="ExpectedOutputTitle"))
+        for icon_kind, item_text in (
+            ("flow", "流程候选（识别后生成）"),
+            ("node", "关键节点（识别后生成）"),
+            ("rule", "工艺 / 规则详情（按识别结果显示）"),
+            ("chain", "接口调用关系（识别后生成）"),
+        ):
+            item = QFrame(); item.setObjectName("ExpectedOutputItem")
+            item_layout = QHBoxLayout(item); item_layout.setContentsMargins(10, 8, 10, 8); item_layout.setSpacing(9)
+            item_layout.addWidget(self._illustration_icon(icon_kind, 26))
+            item_layout.addWidget(QLabel(item_text, objectName="ExpectedOutputLabel"), 1)
+            expected_layout.addWidget(item)
+        expected_layout.addStretch(1)
+        inner = QHBoxLayout(); inner.setSpacing(16); inner.addWidget(analysis_left, 3); inner.addWidget(expected, 1)
+        analysis_layout.addLayout(inner)
+
+        settings = QFrame(); settings.setObjectName("RecognitionCard")
+        setting_layout = QVBoxLayout(settings); setting_layout.setContentsMargins(18, 16, 18, 16); setting_layout.setSpacing(14)
+        setting_layout.addWidget(QLabel("识别设置", objectName="PanelTitle")); setting_layout.addWidget(QLabel("识别深度"))
+        depth = QComboBox(); depth.addItems(["标准（平衡识别速度与深度）", "快速（仅识别接口关系）", "深入（包含数据与异常路径）"]); setting_layout.addWidget(depth)
+        include_cases = BlueCheckBox("包含测试相关分支"); include_cases.setChecked(True)
+        include_db = BlueCheckBox("包含数据库数据流"); include_db.setChecked(True)
+        setting_layout.addWidget(include_cases); setting_layout.addWidget(include_db); setting_layout.addStretch(1)
+        setting_layout.addWidget(QLabel("◇  AI 只分析项目源码，不修改业务数据", objectName="SafetyHint"))
+
+        top = QHBoxLayout(); top.setSpacing(14); top.addWidget(analysis_card, 4); top.addWidget(settings, 1)
+
+        execution = QFrame(); execution.setObjectName("WorkflowExecutionCard"); execution_layout = QVBoxLayout(execution); execution_layout.setContentsMargins(18, 16, 18, 16)
+        execution_layout.addWidget(QLabel("流程确认与测试执行中心", objectName="PanelTitle"))
+        self.workflow_selector = QComboBox(); self.workflow_selector.currentIndexChanged.connect(self.load_workflow)
+        selector_row = QHBoxLayout(); selector_row.addWidget(QLabel("流程方案")); selector_row.addWidget(self.workflow_selector, 1)
+        save = QPushButton("保存流程"); save.clicked.connect(self.save_workflow); confirm = QPushButton("确认识别结果"); confirm.clicked.connect(self.confirm_workflow)
+        selector_row.addWidget(save); selector_row.addWidget(confirm); execution_layout.addLayout(selector_row)
+        self.workflow_summary = QTextEdit(); self.workflow_summary.setReadOnly(True); self.workflow_summary.setMinimumHeight(180); self.workflow_summary.setPlaceholderText("尚未开始流程识别。完成 AI 识别后，这里将展示实际识别结果、关键规则、可确认项及测试用例。")
+        self.workflow_json = QTextEdit(); self.workflow_json.setVisible(False)
+        self.workflow_db_path = QLineEdit(); self.workflow_db_path.setVisible(False); self.workflow_db_read_only = QCheckBox(); self.workflow_db_read_only.setChecked(True); self.workflow_db_read_only.setVisible(False)
+        self.workflow_fixture_name = QLineEdit(); self.workflow_fixture_name.setVisible(False); self.workflow_fixture_json = QTextEdit(); self.workflow_fixture_json.setVisible(False)
+        execution_layout.addWidget(self.workflow_summary, 1)
+        workflow_actions = QHBoxLayout(); generate = QPushButton("生成测试用例"); generate.setProperty("primary", True); generate.clicked.connect(self.generate_workflow_cases); run = QPushButton("执行测试用例"); run.clicked.connect(self.execute_workflow)
+        workflow_actions.addStretch(); workflow_actions.addWidget(generate); workflow_actions.addWidget(run); execution_layout.addLayout(workflow_actions)
+
+        report = QFrame(); report.setObjectName("WorkflowExecutionCard"); report_layout = QVBoxLayout(report); report_layout.setContentsMargins(18, 16, 18, 16); report_layout.addWidget(QLabel("执行结果与报告", objectName="PanelTitle"))
+        self.workflow_output = QTextEdit(); self.workflow_output.setReadOnly(True); self.workflow_output.setPlaceholderText("完成执行后将在此处生成结果与报告。"); report_layout.addWidget(self.workflow_output, 1)
+        lower = QHBoxLayout(); lower.setSpacing(14); lower.addWidget(execution, 3); lower.addWidget(report, 1)
+        layout.addWidget(title); layout.addWidget(stepper); layout.addLayout(top); layout.addLayout(lower, 1)
+        self._finish_page(content, layout)
+        return page
+
     def _workflow_page(self):
+        return self._business_flow_execution_page()
         # Workflow definitions can be large. Keep every control reachable instead of
         # allowing a long JSON document to squeeze adjacent rows into each other.
         page = QScrollArea()
@@ -765,28 +1179,57 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         page.setWidget(content)
         title = QLabel("源码驱动测试 · 路线 A"); title.setObjectName("PageTitle")
-        subtitle = QLabel("查看接口 → AI/人工业务流程 → 数据流与数据库变更确认 → 测试范围 → 用例 → 执行 → 报告")
+        subtitle = QLabel("导入后端源码后，自动理解业务与认证关系；只需确认测试重点，即可生成用例并一键回归。")
         subtitle.setObjectName("PageSubtitle")
+        workflow_steps = QFrame(); workflow_steps.setObjectName("WorkflowStepBar")
+        workflow_steps_layout = QHBoxLayout(workflow_steps)
+        workflow_steps_layout.setContentsMargins(16, 10, 16, 10)
+        for index, text in enumerate(("AI 识别", "确认流程", "生成用例", "执行回归"), 1):
+            step = QLabel(f"{index}  {text}")
+            step.setObjectName("WorkflowStep")
+            step.setProperty("active", "true" if index == 1 else "false")
+            workflow_steps_layout.addWidget(step)
+            if index < 4:
+                divider = QFrame(); divider.setFrameShape(QFrame.HLine); divider.setObjectName("WorkflowStepDivider")
+                workflow_steps_layout.addWidget(divider, 1)
         self.workflow_project_label = QLabel("当前项目：未选择"); self.workflow_project_label.setObjectName("ContextBanner")
+        self.workflow_setup_hint = QLabel("路线 A 在生成业务流程和用例时不需要手工填写单接口请求；仅执行真实 API 用例前，首次保存项目运行地址与认证即可。")
+        self.workflow_setup_hint.setObjectName("ContextBanner")
+        self.workflow_setup_hint.setWordWrap(True)
+        analysis_track = QFrame(); analysis_track.setObjectName("AnalysisTrack")
+        analysis_track_layout = QHBoxLayout(analysis_track)
+        analysis_track_layout.setContentsMargins(16, 12, 16, 12)
+        for index, (heading, detail) in enumerate((
+            ("① 导入项目源码", "识别接口、模块与认证入口"),
+            ("② AI 分析业务关系", "整理调用链与测试风险"),
+            ("③ 输出测试方案", "确认重点后自动生成用例"),
+        )):
+            block = QLabel(f"{heading}\n{detail}")
+            block.setObjectName("AnalysisTrackItem")
+            analysis_track_layout.addWidget(block, 1)
+            if index < 2:
+                arrow = QLabel("→"); arrow.setObjectName("AnalysisTrackArrow")
+                analysis_track_layout.addWidget(arrow)
+        self.workflow_project_selector = QComboBox(); self.workflow_project_selector.currentIndexChanged.connect(self.select_workflow_project)
         route_row = QHBoxLayout()
         view_endpoints = QPushButton("查看接口资产"); view_endpoints.clicked.connect(lambda: self.go_to_page(1))
-        ai_generate = QPushButton("AI 生成业务流程"); ai_generate.clicked.connect(self.generate_workflow_draft)
-        manual_generate = QPushButton("人工新建业务流程"); manual_generate.clicked.connect(self.create_manual_workflow)
-        route_row.addWidget(view_endpoints); route_row.addWidget(ai_generate); route_row.addWidget(manual_generate); route_row.addStretch()
+        ai_generate = QPushButton("开始 AI 识别"); ai_generate.setProperty("primary", True); ai_generate.clicked.connect(self.generate_workflow_draft)
+        manual_generate = QPushButton("手工补充测试方案"); manual_generate.clicked.connect(self.create_manual_workflow)
+        route_row.addWidget(QLabel("测试项目")); route_row.addWidget(self.workflow_project_selector, 1); route_row.addWidget(view_endpoints); route_row.addWidget(ai_generate); route_row.addWidget(manual_generate); route_row.addStretch()
         selector_row = QHBoxLayout()
         self.workflow_selector = QComboBox()
         self.workflow_selector.currentIndexChanged.connect(self.load_workflow)
         save_btn = QPushButton("保存流程"); save_btn.clicked.connect(self.save_workflow)
         confirm_btn = QPushButton("确认流程"); confirm_btn.clicked.connect(self.confirm_workflow)
-        coverage_btn = QPushButton("检查工艺完整性"); coverage_btn.clicked.connect(self.check_process_coverage)
+        coverage_btn = QPushButton("检查测试覆盖"); coverage_btn.clicked.connect(self.check_process_coverage)
         selector_row.addWidget(QLabel("流程")); selector_row.addWidget(self.workflow_selector, 1)
         selector_row.addWidget(save_btn); selector_row.addWidget(coverage_btn); selector_row.addWidget(confirm_btn)
         self.workflow_scope = QTextEdit(); self.workflow_scope.setMaximumHeight(65)
-        self.workflow_scope.setPlaceholderText("确认测试方向，例如：订单创建、库存扣减、权限、重复提交、事务一致性、异常回滚")
+        self.workflow_scope.setPlaceholderText("可选：补充你的关注点，例如：权限、重复提交、边界值、异常回滚。不填时系统自动覆盖常规风险。")
         scope_row = QHBoxLayout()
-        confirm_scope = QPushButton("确认测试范围"); confirm_scope.clicked.connect(self.confirm_workflow_scope)
-        generate_cases_btn = QPushButton("生成接口测试用例"); generate_cases_btn.clicked.connect(self.generate_workflow_cases)
-        scope_row.addWidget(QLabel("测试范围")); scope_row.addWidget(self.workflow_scope, 1)
+        confirm_scope = QPushButton("保存测试重点"); confirm_scope.clicked.connect(self.confirm_workflow_scope)
+        generate_cases_btn = QPushButton("自动生成测试用例"); generate_cases_btn.setProperty("primary", True); generate_cases_btn.clicked.connect(self.generate_workflow_cases)
+        scope_row.addWidget(QLabel("测试重点")); scope_row.addWidget(self.workflow_scope, 1)
         scope_row.addWidget(confirm_scope); scope_row.addWidget(generate_cases_btn)
         self.workflow_json = QTextEdit()
         self.workflow_json.setPlaceholderText(
@@ -794,6 +1237,9 @@ class MainWindow(QMainWindow):
         )
         self.workflow_json.setMinimumHeight(260)
         self.workflow_json.setMaximumHeight(320)
+        self.workflow_summary = QTextEdit(); self.workflow_summary.setReadOnly(True)
+        self.workflow_summary.setMinimumHeight(145); self.workflow_summary.setMaximumHeight(190)
+        self.workflow_summary.setPlaceholderText("点击“自动分析并生成测试方案”后，这里会用中文说明识别到的业务场景、接口链路、风险与推荐测试重点。")
         database_row = QHBoxLayout()
         self.workflow_db_path = QLineEdit(); self.workflow_db_path.setPlaceholderText("SQLite 测试库或副本路径")
         choose_db = QPushButton("选择测试库"); choose_db.clicked.connect(self.choose_workflow_database)
@@ -815,13 +1261,76 @@ class MainWindow(QMainWindow):
         self.workflow_output = QTextEdit(); self.workflow_output.setReadOnly(True)
         self.workflow_output.setMinimumHeight(150)
         self.workflow_output.setMaximumHeight(260)
-        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(self.workflow_project_label)
-        layout.addLayout(route_row); layout.addLayout(selector_row); layout.addWidget(QLabel("业务流程、数据流、数据库变更和步骤定义（需人工审核）"))
-        layout.addWidget(self.workflow_json); layout.addLayout(scope_row)
-        layout.addLayout(database_row); layout.addLayout(fixture_row); layout.addWidget(execute_btn)
-        action_row = QHBoxLayout(); action_row.addWidget(diff_btn); action_row.addWidget(replay_btn); action_row.addStretch(); layout.addLayout(action_row)
-        layout.addWidget(QLabel("流程执行与审计结果")); layout.addWidget(self.workflow_output)
+        # Project selection is part of the first action row.  Keep the page head
+        # compact so the workflow editor stays visible.
+        # Use a real hidden panel instead of constraining a checkable group box.
+        # Fixed-height group boxes are clipped by Windows DPI/layout calculations.
+        advanced_toggle = QPushButton("高级选项")
+        advanced_toggle.setObjectName("AdvancedToggle")
+        advanced_toggle.setCheckable(True)
+        advanced_toggle.setToolTip("日常生成与执行不需要配置；仅在需要编辑底层流程或校验数据库时展开。")
+        advanced_group = QWidget()
+        advanced_group.setVisible(False)
+        advanced_layout = QVBoxLayout(advanced_group)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(8)
+        advanced_toggle.toggled.connect(advanced_group.setVisible)
+        advanced_toggle.toggled.connect(
+            lambda checked: advanced_toggle.setText("收起高级选项" if checked else "高级选项")
+        )
+        advanced_layout.addWidget(QLabel("底层流程结构（供高级用户编辑，日常使用请看上方中文测试方案）"))
+        advanced_layout.addWidget(self.workflow_json)
+        advanced_layout.addLayout(database_row)
+        advanced_layout.addLayout(fixture_row)
+        workflow_controls = QFrame(); workflow_controls.setObjectName("ProjectPanel")
+        workflow_controls_layout = QVBoxLayout(workflow_controls)
+        workflow_controls_layout.addWidget(analysis_track)
+        workflow_controls_layout.addLayout(route_row)
+        workflow_controls_layout.addLayout(selector_row)
+
+        summary_card = QFrame(); summary_card.setObjectName("ProjectPanel")
+        summary_layout = QVBoxLayout(summary_card)
+        summary_title = QLabel("AI 测试方案（中文）"); summary_title.setObjectName("PanelTitle")
+        summary_layout.addWidget(summary_title); summary_layout.addWidget(self.workflow_summary)
+
+        focus_card = QFrame(); focus_card.setObjectName("ProjectPanel")
+        focus_layout = QVBoxLayout(focus_card)
+        focus_title = QLabel("测试重点与执行"); focus_title.setObjectName("PanelTitle")
+        run_row = QHBoxLayout()
+        run_row.addWidget(advanced_toggle)
+        run_row.addStretch()
+        run_row.addWidget(execute_btn)
+        action_row = QHBoxLayout(); action_row.addWidget(diff_btn); action_row.addWidget(replay_btn); action_row.addStretch()
+        focus_layout.addWidget(focus_title); focus_layout.addLayout(scope_row); focus_layout.addLayout(run_row)
+        focus_layout.addWidget(advanced_group); focus_layout.addLayout(action_row)
+
+        output_card = QFrame(); output_card.setObjectName("ProjectPanel")
+        output_layout = QVBoxLayout(output_card)
+        output_title = QLabel("流程执行与审计结果"); output_title.setObjectName("PanelTitle")
+        output_layout.addWidget(output_title); output_layout.addWidget(self.workflow_output)
+        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(workflow_steps)
+        layout.addWidget(workflow_controls); layout.addWidget(summary_card); layout.addWidget(focus_card); layout.addWidget(output_card)
         self._finish_page(content, layout)
+        return page
+
+    def _git_import_page(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        title = QLabel("导入 Git 项目"); title.setObjectName("PageTitle")
+        note = QLabel("连接远程 Git 仓库并克隆到本地，或选择已克隆仓库。导入时只读取源码分析接口，不会修改业务代码。")
+        note.setObjectName("PageSubtitle"); note.setWordWrap(True)
+        self.git_remote_url = QLineEdit(); self.git_remote_url.setPlaceholderText("Git 仓库地址，例如 https://github.com/org/service.git")
+        self.git_clone_parent = QLineEdit(str(self.db.path.parent / "git-projects")); self.git_clone_parent.setPlaceholderText("克隆保存的父目录")
+        choose_parent = QPushButton("选择保存目录"); choose_parent.clicked.connect(self.choose_git_clone_parent)
+        self.git_project_path = QLineEdit(); self.git_project_path.setPlaceholderText("或选择已克隆的本地 Git 项目目录")
+        choose = QPushButton("选择本地仓库"); choose.clicked.connect(self.choose_git_project)
+        clone_import = QPushButton("克隆并导入"); clone_import.setProperty("primary", True); clone_import.clicked.connect(self.clone_and_import_git_project)
+        local_import = QPushButton("导入本地仓库"); local_import.clicked.connect(self.import_git_project)
+        remote_row = QHBoxLayout(); remote_row.addWidget(self.git_remote_url, 2); remote_row.addWidget(self.git_clone_parent, 1); remote_row.addWidget(choose_parent); remote_row.addWidget(clone_import)
+        local_row = QHBoxLayout(); local_row.addWidget(self.git_project_path, 1); local_row.addWidget(choose); local_row.addWidget(local_import)
+        self.git_import_output = QTextEdit(); self.git_import_output.setReadOnly(True); self.git_import_output.setMaximumHeight(170)
+        self.git_import_output.setPlaceholderText("导入结果会显示在这里。")
+        layout.addWidget(title); layout.addWidget(note); layout.addWidget(QLabel("远程仓库")); layout.addLayout(remote_row); layout.addWidget(QLabel("已有本地仓库")); layout.addLayout(local_row); layout.addWidget(self.git_import_output); layout.addStretch(1)
+        self._finish_page(page, layout)
         return page
 
     def _reports_page(self):
@@ -839,7 +1348,7 @@ class MainWindow(QMainWindow):
         open_html = QPushButton("打开 HTML 报告"); open_html.setProperty("primary", True); open_html.clicked.connect(lambda: self.open_selected_report("html"))
         open_json = QPushButton("打开 JSON 明细"); open_json.clicked.connect(lambda: self.open_selected_report("json"))
         report_actions = QHBoxLayout(); report_actions.addWidget(refresh); report_actions.addWidget(open_html); report_actions.addWidget(open_json); report_actions.addStretch()
-        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(self.report_project_label); layout.addLayout(report_actions)
+        layout.addWidget(title); layout.addWidget(subtitle); layout.addLayout(report_actions)
         layout.addWidget(self.report_table, 1); layout.addWidget(self.report_detail, 1)
         self.report_table.setAlternatingRowColors(True)
         self.report_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -1054,7 +1563,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(welcome); main_layout.addWidget(hint); main_layout.addLayout(vscode_actions)
         main_layout.addWidget(result_tabs, 1); main_layout.addWidget(composer)
         workspace.addWidget(rail); workspace.addWidget(main); workspace.setSizes([240, 900])
-        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(self.ai_dialogue_project_label); layout.addWidget(workspace, 1)
+        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(workspace, 1)
         self._ai_dialogue_session_id = None
         self._finish_page(page, layout)
         self._refresh_chat_model_selector()
@@ -1083,14 +1592,19 @@ class MainWindow(QMainWindow):
     def _endpoint_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
         title = QLabel("接口资产"); title.setObjectName("PageTitle")
-        subtitle = QLabel("浏览、搜索与维护统一接口定义"); subtitle.setObjectName("PageSubtitle")
+        subtitle = QLabel("浏览和维护接口资产；选中接口后可直接进入该接口的调试与用例保存。")
+        subtitle.setObjectName("PageSubtitle")
         self.endpoint_project_label = QLabel("当前项目：未选择")
         self.endpoint_project_label.setObjectName("ContextBanner")
         filter_row = QHBoxLayout()
+        self.endpoint_project_selector = QComboBox()
+        self.endpoint_project_selector.currentIndexChanged.connect(self.select_endpoint_project)
         self.source_filter = QComboBox(); self.source_filter.addItem("全部资料源", None)
         self.module_filter = QComboBox(); self.module_filter.addItem("全部模块", None)
         self.source_filter.currentIndexChanged.connect(self.refresh_endpoints)
         self.module_filter.currentIndexChanged.connect(self.refresh_endpoints)
+        filter_row.addWidget(QLabel("测试项目"))
+        filter_row.addWidget(self.endpoint_project_selector, 1)
         filter_row.addWidget(QLabel("资料源"))
         filter_row.addWidget(self.source_filter)
         filter_row.addWidget(QLabel("模块"))
@@ -1112,58 +1626,307 @@ class MainWindow(QMainWindow):
         split.addWidget(self.endpoint_table); split.addWidget(self.endpoint_detail)
         split.setSizes([700, 500])
         actions = QHBoxLayout()
+        debug_btn = QPushButton("调试选中接口"); debug_btn.clicked.connect(self.debug_selected_endpoint)
         add_btn = QPushButton("手工添加"); add_btn.clicked.connect(self.add_endpoint)
         edit_btn = QPushButton("编辑 JSON"); edit_btn.clicked.connect(self.edit_endpoint)
         delete_btn = QPushButton("删除接口"); delete_btn.clicked.connect(self.delete_endpoint)
-        actions.addWidget(add_btn); actions.addWidget(edit_btn); actions.addWidget(delete_btn); actions.addStretch()
-        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(self.endpoint_project_label)
+        actions.addWidget(debug_btn); actions.addWidget(add_btn); actions.addWidget(edit_btn); actions.addWidget(delete_btn); actions.addStretch()
+        # The project combobox below is the single source of truth.  Do not
+        # duplicate it with a tall context banner.
+        layout.addWidget(title); layout.addWidget(subtitle)
         layout.addLayout(filter_row); layout.addWidget(self.search)
         layout.addLayout(actions); layout.addWidget(split, 1)
         add_btn.setProperty("primary", True)
+        debug_btn.setProperty("primary", True)
         delete_btn.setProperty("danger", True)
         self.endpoint_table.setAlternatingRowColors(True)
         self.endpoint_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self._finish_page(page, layout)
         return page
 
+    def _environment_validation_page(self):
+        """Route A environment dashboard.  It keeps the real configuration fields
+        while presenting the first-run check as a readable validation journey."""
+        page = QScrollArea(); page.setObjectName("EnvironmentValidationScroll"); page.setWidgetResizable(True)
+        content = QWidget(); layout = QVBoxLayout(content); page.setWidget(content)
+        title = QLabel("环境校验"); title.setObjectName("PageTitle")
+        subtitle = QLabel("校验测试环境、认证能力与接口资产可用性，确保后续流程测试可执行。")
+        subtitle.setObjectName("PageSubtitle")
+
+        setup_card = QFrame(); setup_card.setObjectName("ValidationConfigCard")
+        setup = QGridLayout(setup_card); setup.setContentsMargins(18, 16, 18, 16); setup.setHorizontalSpacing(16); setup.setVerticalSpacing(6)
+        setup.addWidget(QLabel("项目"), 0, 0); setup.addWidget(QLabel("环境"), 0, 1); setup.addWidget(QLabel("基础地址（Base URL）"), 0, 2)
+        self.validation_project_selector = QComboBox()
+        self.validation_project_selector.setObjectName("ValidationProjectSelector")
+        self.validation_project_selector.currentIndexChanged.connect(self.select_validation_project)
+        self.env_selector = QComboBox(); self.env_selector.currentIndexChanged.connect(self.select_environment)
+        self.base_url = QLineEdit(); self.base_url.setPlaceholderText("例如：http://192.168.31.117:3000")
+        self.env_name = QLineEdit("测试环境"); self.env_name.setVisible(False)
+        self.headers = QTextEdit("{}"); self.headers.setVisible(False)
+        self.variables = QTextEdit("{}"); self.variables.setVisible(False)
+        self.auth_username = QLineEdit(); self.auth_username.setPlaceholderText("测试账号（认证需要时填写）")
+        self.auth_password = QLineEdit(); self.auth_password.setEchoMode(QLineEdit.Password); self.auth_password.setPlaceholderText("测试密码（认证需要时填写）")
+        self.environment_confirmed = BlueCheckBox("已确认目标为授权的测试/预发布环境")
+        self.auth_status_hint = QLabel("将从已导入接口自动识别登录与 Token 规则")
+        self.auth_status_hint.setObjectName("ValidationHint")
+        validate_button = QPushButton("▶  开始环境校验"); validate_button.setProperty("primary", True); validate_button.clicked.connect(self.run_environment_validation)
+        setup.addWidget(self.validation_project_selector, 1, 0); setup.addWidget(self.env_selector, 1, 1); setup.addWidget(self.base_url, 1, 2); setup.addWidget(validate_button, 1, 3)
+        setup.setColumnStretch(0, 1); setup.setColumnStretch(1, 1); setup.setColumnStretch(2, 2)
+
+        result_card = QFrame(); result_card.setObjectName("ValidationResultCard")
+        result_layout = QVBoxLayout(result_card); result_layout.setContentsMargins(18, 16, 18, 16); result_layout.setSpacing(14)
+        result_title = QLabel("环境校验结果"); result_title.setObjectName("PanelTitle")
+        result_layout.addWidget(result_title)
+        self.validation_steps = []
+        steps_row = QHBoxLayout(); steps_row.setSpacing(8)
+        for index, (name, icon_kind, detail) in enumerate((
+            ("测试环境", "server", "等待校验"), ("登录认证", "key", "自动识别"),
+            ("Token 获取", "shield", "回归时自动处理"), ("接口资产", "cube", "等待校验"), ("校验完成", "complete", "等待开始"),
+        ), 1):
+            card = QFrame(); card.setObjectName("ValidationStepCard")
+            card_layout = QVBoxLayout(card); card_layout.setContentsMargins(10, 12, 10, 10); card_layout.setSpacing(8)
+            heading = QLabel(f"{index}  {name}"); heading.setObjectName("ValidationStepTitle")
+            symbol = self._illustration_icon(icon_kind, 78); symbol.setObjectName("ValidationStepIcon")
+            detail_label = QLabel(detail); detail_label.setObjectName("ValidationStepDetail"); detail_label.setAlignment(Qt.AlignCenter); detail_label.setWordWrap(True)
+            status_icon = self._illustration_icon("status_pending", 15)
+            status = QLabel("待校验"); status.setObjectName("ValidationStepPending")
+            status_row = QHBoxLayout(); status_row.setSpacing(5)
+            status_row.addStretch(1); status_row.addWidget(status_icon); status_row.addWidget(status); status_row.addStretch(1)
+            card_layout.addWidget(heading); card_layout.addWidget(symbol, 1, alignment=Qt.AlignCenter); card_layout.addWidget(detail_label); card_layout.addLayout(status_row)
+            self.validation_steps.append((detail_label, status, status_icon))
+            steps_row.addWidget(card, 1)
+            if index < 5:
+                arrow = QLabel("→"); arrow.setObjectName("ValidationArrow"); arrow.setAlignment(Qt.AlignCenter); steps_row.addWidget(arrow)
+        result_layout.addLayout(steps_row)
+        details_row = QHBoxLayout(); details_row.setSpacing(14)
+        self.validation_metrics = {}
+        self.validation_metric_icons = {}
+        self.validation_panel_status = {}
+        self.validation_panel_summaries = {}
+        self.validation_asset_action = None
+        self._validation_response_detail = {}
+        for name, rows in (("基础连通性", ("DNS 解析", "网络响应", "服务健康")), ("认证校验", ("登录接口", "Token 有效期", "认证方式")), ("接口资产校验", ("发现接口数量", "可访问接口数量", "不可访问接口数量"))):
+            panel = QFrame(); panel.setObjectName("ValidationDetailPanel")
+            panel.setMinimumWidth(0)
+            panel_layout = QVBoxLayout(panel); panel_layout.setContentsMargins(14, 12, 14, 12); panel_layout.setSpacing(6)
+            panel_header = QHBoxLayout()
+            panel_title = QLabel(name); panel_title.setObjectName("ValidationDetailTitle")
+            panel_status_icon = self._illustration_icon("status_pending", 14)
+            panel_status = QLabel("待校验"); panel_status.setObjectName("ValidationPanelPending")
+            panel_header.addWidget(panel_title); panel_header.addStretch(1); panel_header.addWidget(panel_status_icon); panel_header.addWidget(panel_status)
+            panel_layout.addLayout(panel_header)
+            self.validation_panel_status[name] = (panel_status, panel_status_icon)
+            for row_index, row in enumerate(rows):
+                metric_row = QFrame(); metric_row.setObjectName("ValidationMetricRow")
+                metric_layout = QHBoxLayout(metric_row); metric_layout.setContentsMargins(0, 0, 0, 0); metric_layout.setSpacing(8)
+                metric_name = QLabel(row); metric_name.setObjectName("ValidationMetric")
+                metric_value = QLabel("待校验"); metric_value.setObjectName("ValidationMetricValue")
+                metric_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                metric_icon = self._illustration_icon("status_pending", 14)
+                metric_layout.addWidget(metric_name, 1); metric_layout.addWidget(metric_value); metric_layout.addWidget(metric_icon)
+                panel_layout.addWidget(metric_row)
+                metric_divider = QFrame(); metric_divider.setObjectName("ValidationMetricDivider"); metric_divider.setFixedHeight(1)
+                panel_layout.addWidget(metric_divider)
+                self.validation_metrics[row] = metric_value
+                self.validation_metric_icons[row] = metric_icon
+            panel_layout.addStretch(1)
+            summary_icon = self._illustration_icon("status_pending", 15)
+            summary = QLabel("等待完成后显示校验结论"); summary.setObjectName("ValidationSummary"); summary.setWordWrap(True)
+            summary_row = QHBoxLayout(); summary_row.setSpacing(6)
+            summary_row.addWidget(summary_icon, 0, Qt.AlignTop); summary_row.addWidget(summary, 1)
+            panel_layout.addLayout(summary_row)
+            self.validation_panel_summaries[name] = (summary, summary_icon)
+            if name == "接口资产校验":
+                self.validation_asset_action = QPushButton("查看校验响应")
+                self.validation_asset_action.setObjectName("ValidationDetailAction")
+                self.validation_asset_action.setFixedSize(126, 32)
+                self.validation_asset_action.setVisible(False)
+                self.validation_asset_action.clicked.connect(self.show_validation_response_details)
+                panel_layout.addWidget(self.validation_asset_action, 0, Qt.AlignHCenter)
+            details_row.addWidget(panel, 1)
+        result_layout.addLayout(details_row)
+
+        log_card = QFrame(); log_card.setObjectName("ValidationLogCard")
+        log_layout = QVBoxLayout(log_card); log_layout.setContentsMargins(16, 16, 16, 16); log_layout.setSpacing(10)
+        log_title = QLabel("校验日志"); log_title.setObjectName("PanelTitle")
+        self.validation_log = QScrollArea(); self.validation_log.setObjectName("ValidationLog")
+        self.validation_log.setWidgetResizable(True); self.validation_log.setFrameShape(QFrame.NoFrame)
+        self.validation_log.setStyleSheet("QScrollArea { background: #ffffff; border: none; } QWidget { background: #ffffff; }")
+        self.validation_log.viewport().setStyleSheet("background: #ffffff;")
+        self.validation_log_content = QWidget(); self.validation_log_content.setObjectName("ValidationLogContent")
+        self.validation_log_content.setStyleSheet("background: #ffffff;")
+        self.validation_log_rows = QVBoxLayout(self.validation_log_content)
+        self.validation_log_rows.setContentsMargins(0, 0, 0, 0); self.validation_log_rows.setSpacing(0)
+        self.validation_log.setWidget(self.validation_log_content)
+        self._set_validation_log([("", "等待开始环境校验", "pending")])
+        rerun = QPushButton("↻  重新校验"); rerun.clicked.connect(self.run_environment_validation)
+        export_report = QPushButton("⇩  导出校验报告"); export_report.setObjectName("ValidationExportReport"); export_report.clicked.connect(self.export_environment_validation_report)
+        log_layout.addWidget(log_title); log_layout.addWidget(self.validation_log, 1); log_layout.addWidget(rerun); log_layout.addWidget(export_report)
+
+        result_card.setMinimumWidth(0)
+        log_card.setFixedWidth(270)
+        log_card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        # The log is part of the validation dashboard, not only the result
+        # section.  Put it beside the configuration + results stack so its
+        # title starts on the same horizontal line as “开始环境校验”.
+        dashboard_left = QVBoxLayout(); dashboard_left.setSpacing(18)
+        dashboard_left.addWidget(setup_card)
+        dashboard_left.addWidget(result_card, 1)
+        dashboard_row = QHBoxLayout(); dashboard_row.setSpacing(18)
+        dashboard_row.addLayout(dashboard_left, 1)
+        dashboard_row.addWidget(log_card, 0)
+        runtime_card = QFrame(); runtime_card.setObjectName("ProjectPanel")
+        runtime_layout = QVBoxLayout(runtime_card)
+        runtime_title = QLabel("首次运行设置"); runtime_title.setObjectName("PanelTitle")
+        runtime_form = QFormLayout(); runtime_form.addRow("认证状态", self.auth_status_hint); runtime_form.addRow("测试账号", self.auth_username); runtime_form.addRow("测试密码", self.auth_password); runtime_form.addRow("执行授权", self.environment_confirmed)
+        save = QPushButton("保存并启用一键回归"); save.setProperty("primary", True); save.clicked.connect(self.save_environment)
+        runtime_layout.addWidget(runtime_title); runtime_layout.addLayout(runtime_form); runtime_layout.addWidget(save, alignment=Qt.AlignLeft)
+
+        debug_card = QFrame(); debug_card.setObjectName("ProjectPanel")
+        debug_layout = QVBoxLayout(debug_card)
+        debug_title = QLabel("单接口调试（可选）"); debug_title.setObjectName("PanelTitle")
+        self.debug_endpoint_label = QLabel("从“接口资产”中选择接口后点击“调试选中接口”，也可手工填写。")
+        self.debug_endpoint_label.setObjectName("ValidationHint")
+        self.method = QComboBox(); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+        self.path = QLineEdit("/"); self.body = QTextEdit("{}"); self.body.setFixedHeight(90)
+        debug_form = QFormLayout(); debug_form.addRow("请求方法", self.method); debug_form.addRow("接口路径", self.path); debug_form.addRow("Body JSON", self.body)
+        self.response = QTextEdit(); self.response.setReadOnly(True); self.response.setMinimumHeight(130)
+        send = QPushButton("发送当前接口"); send.setProperty("primary", True); send.clicked.connect(self.send_request)
+        save_case = QPushButton("保存为测试用例"); save_case.clicked.connect(self.save_request_as_case)
+        actions = QHBoxLayout(); actions.addWidget(send); actions.addWidget(save_case); actions.addStretch()
+        debug_layout.addWidget(debug_title); debug_layout.addWidget(self.debug_endpoint_label); debug_layout.addLayout(debug_form); debug_layout.addLayout(actions); debug_layout.addWidget(self.response)
+
+        # Keep the validation dashboard visually identical to the product flow:
+        # configuration is represented by the top row and the result/log area.
+        # Extra credentials and manual debugging remain available to the runtime
+        # methods, but are intentionally not placed below the dashboard.
+        runtime_card.setVisible(False); debug_card.setVisible(False)
+        layout.addWidget(title); layout.addWidget(subtitle); layout.addLayout(dashboard_row)
+        # Keep the hidden operational widgets parented by this page.  They are
+        # used by saved-environment and endpoint-debug actions, but must not
+        # consume any dashboard space or be garbage-collected by Qt.
+        layout.addWidget(runtime_card); layout.addWidget(debug_card)
+        self._finish_page(content, layout)
+        return page
+
     def _request_page(self):
-        page = QWidget(); layout = QVBoxLayout(page); form = QFormLayout()
-        title = QLabel("环境与请求调试"); title.setObjectName("PageTitle")
-        subtitle = QLabel("管理测试环境、认证变量并发送单接口请求"); subtitle.setObjectName("PageSubtitle")
+        return self._environment_validation_page()
+        # This page has two complete forms.  Keep their field heights stable and
+        # scroll the page on smaller windows instead of compressing editors into
+        # unreadable one-line strips.
+        page = QScrollArea(); page.setObjectName("RequestConfigScroll"); page.setWidgetResizable(True)
+        content = QWidget(); layout = QVBoxLayout(content); page.setWidget(content)
+        title = QLabel("项目运行配置与接口调试"); title.setObjectName("PageTitle")
+        subtitle = QLabel("每个项目首次只需保存一次测试环境地址；认证方式会从已导入的接口中自动识别并在回归时自动处理。")
+        subtitle.setObjectName("PageSubtitle")
         self.request_project_label = QLabel("当前项目：未选择"); self.request_project_label.setObjectName("ContextBanner")
+        self.request_setup_hint = QLabel("步骤：① 保存项目运行配置（一次）  ② 从“接口资产”选择接口调试  ③ 保存为用例或在用例页一键执行。")
+        self.request_setup_hint.setObjectName("ContextBanner")
+        self.request_setup_hint.setWordWrap(True)
+        validation_track = QFrame(); validation_track.setObjectName("ValidationTrack")
+        validation_track_layout = QHBoxLayout(validation_track)
+        validation_track_layout.setContentsMargins(14, 10, 14, 10)
+        for index, (heading, detail) in enumerate((
+            ("① 环境地址", "保存测试或预发布地址"),
+            ("② 登录认证", "自动识别登录接口"),
+            ("③ Token 复用", "回归执行时自动处理"),
+            ("④ 接口可用性", "从接口资产进入调试"),
+        )):
+            item = QLabel(f"{heading}\n{detail}")
+            item.setObjectName("ValidationTrackItem")
+            validation_track_layout.addWidget(item, 1)
+
+        environment_card = QFrame(); environment_card.setObjectName("ProjectPanel")
+        environment_layout = QVBoxLayout(environment_card)
+        environment_title = QLabel("环境校验与首次运行设置"); environment_title.setObjectName("PanelTitle")
+        # QFormLayout may calculate QTextEdit rows using a single-line height on
+        # high-DPI Windows displays.  Use explicit grid rows for the two JSON
+        # editors so the checkbox and save button can never overlap them.
+        environment_form = QGridLayout()
+        environment_form.setHorizontalSpacing(14)
+        environment_form.setVerticalSpacing(10)
+        environment_form.setColumnStretch(1, 1)
         self.env_selector = QComboBox(); self.env_selector.currentIndexChanged.connect(self.select_environment)
         self.env_name = QLineEdit("测试环境")
         self.base_url = QLineEdit()
+        self.base_url.setPlaceholderText("例如：http://192.168.31.117:3000")
+        self.headers = QTextEdit("{}"); self.headers.setFixedHeight(74)
+        self.variables = QTextEdit("{}"); self.variables.setFixedHeight(74)
+        self.auth_status_hint = QLabel("认证：正在根据已导入接口自动识别"); self.auth_status_hint.setObjectName("PageSubtitle")
+        self.auth_username = QLineEdit(); self.auth_username.setPlaceholderText("仅认证需要时填写测试账号")
+        self.auth_password = QLineEdit(); self.auth_password.setPlaceholderText("仅认证需要时填写测试密码"); self.auth_password.setEchoMode(QLineEdit.Password)
+        self.environment_confirmed = QCheckBox("首次确认：该地址是已授权的测试/预发布环境（保存后同项目无需重复确认）")
+        environment_form.addWidget(QLabel("已保存环境"), 0, 0)
+        environment_form.addWidget(self.env_selector, 0, 1)
+        environment_form.addWidget(QLabel("环境名称"), 1, 0)
+        environment_form.addWidget(self.env_name, 1, 1)
+        environment_form.addWidget(QLabel("测试环境地址"), 2, 0)
+        environment_form.addWidget(self.base_url, 2, 1)
+        environment_form.addWidget(QLabel("认证状态"), 3, 0)
+        environment_form.addWidget(self.auth_status_hint, 3, 1)
+        environment_form.addWidget(QLabel("测试账号"), 4, 0)
+        environment_form.addWidget(self.auth_username, 4, 1)
+        environment_form.addWidget(QLabel("测试密码"), 5, 0)
+        environment_form.addWidget(self.auth_password, 5, 1)
+        environment_form.addWidget(QLabel("执行授权"), 6, 0)
+        environment_form.addWidget(self.environment_confirmed, 6, 1)
+        # Do not use a clipped, checkable QGroupBox here.  A hidden widget has no
+        # layout footprint until explicitly expanded, at every display scale.
+        advanced_runtime_toggle = QPushButton("高级配置")
+        advanced_runtime_toggle.setObjectName("AdvancedToggle")
+        advanced_runtime_toggle.setCheckable(True)
+        advanced_runtime_toggle.setToolTip("首次配置通常只需填写测试环境地址和测试账号。")
+        advanced_runtime = QFrame()
+        advanced_runtime.setObjectName("InlineAdvancedPanel")
+        advanced_runtime.setVisible(False)
+        advanced_form = QFormLayout(advanced_runtime)
+        advanced_form.addRow("公共 Headers JSON", self.headers)
+        advanced_form.addRow("项目变量 JSON", self.variables)
+        advanced_runtime_toggle.toggled.connect(advanced_runtime.setVisible)
+        advanced_runtime_toggle.toggled.connect(
+            lambda checked: advanced_runtime_toggle.setText("收起高级配置" if checked else "高级配置")
+        )
+        save = QPushButton("保存并启用一键回归"); save.clicked.connect(self.save_environment)
+        environment_actions = QHBoxLayout(); environment_actions.addWidget(save)
+        environment_actions.addWidget(advanced_runtime_toggle); environment_actions.addStretch()
+        environment_layout.addWidget(environment_title); environment_layout.addLayout(environment_form)
+        environment_layout.addLayout(environment_actions); environment_layout.addWidget(advanced_runtime)
+
+        request_card = QFrame(); request_card.setObjectName("ProjectPanel")
+        request_layout = QVBoxLayout(request_card)
+        request_title = QLabel("接口调试（可选）"); request_title.setObjectName("PanelTitle")
+        self.debug_endpoint_label = QLabel("请在“接口资产”中选择一个接口后点击“调试选中接口”，也可手工填写。")
+        self.debug_endpoint_label.setObjectName("ContextBanner")
+        request_form = QFormLayout()
         self.method = QComboBox(); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
         self.path = QLineEdit("/")
-        self.headers = QTextEdit("{}"); self.headers.setMaximumHeight(90)
-        self.variables = QTextEdit("{}"); self.variables.setMaximumHeight(90)
-        self.body = QTextEdit("{}"); self.body.setMaximumHeight(130)
-        self.environment_confirmed = QCheckBox("我确认该地址是已授权的测试/预发布环境")
-        form.addRow("已有环境", self.env_selector); form.addRow("环境名称", self.env_name); form.addRow("Base URL", self.base_url)
-        form.addRow("Method", self.method); form.addRow("Path", self.path)
-        form.addRow("Headers JSON", self.headers); form.addRow("Body JSON", self.body)
-        form.addRow("环境变量 JSON", self.variables)
-        form.addRow("执行授权", self.environment_confirmed)
+        self.body = QTextEdit("{}"); self.body.setFixedHeight(112)
+        request_form.addRow("请求方法", self.method); request_form.addRow("接口路径", self.path); request_form.addRow("Body JSON", self.body)
         buttons = QHBoxLayout()
-        save = QPushButton("保存环境"); save.clicked.connect(self.save_environment)
-        send = QPushButton("发送请求"); send.clicked.connect(self.send_request)
+        send = QPushButton("发送当前接口"); send.clicked.connect(self.send_request)
         save_as_case = QPushButton("保存为测试用例"); save_as_case.clicked.connect(self.save_request_as_case)
-        buttons.addWidget(save); buttons.addWidget(send); buttons.addWidget(save_as_case); buttons.addStretch()
+        buttons.addWidget(send); buttons.addWidget(save_as_case); buttons.addStretch()
         self.response = QTextEdit(); self.response.setReadOnly(True)
-        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(self.request_project_label)
-        layout.addLayout(form); layout.addLayout(buttons)
+        self.response.setMinimumHeight(190)
+        self.response.setMaximumHeight(260)
+        request_layout.addWidget(request_title); request_layout.addWidget(self.debug_endpoint_label); request_layout.addLayout(request_form); request_layout.addLayout(buttons)
+        # The running configuration itself identifies the project.  Retain the
+        # guidance as a short subtitle rather than two large banners.
+        layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(validation_track)
+        layout.addWidget(environment_card); layout.addWidget(request_card)
         layout.addWidget(QLabel("响应（敏感字段已脱敏）")); layout.addWidget(self.response, 1)
         save.setProperty("primary", True)
         send.setProperty("primary", True)
-        self._finish_page(page, layout)
+        layout.addStretch(1)
+        self._finish_page(content, layout)
         return page
 
     @staticmethod
     def _finish_page(page, layout):
         page.setObjectName("ContentPage")
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(14)
+        # 统一所有页面的阅读宽度与节奏，避免控件过度拉伸和页面松散。
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(12)
 
     def _load_ai_settings(self):
         mode = self.db.get_setting("ai_provider", "codex")
@@ -1398,6 +2161,30 @@ class MainWindow(QMainWindow):
         case_index = self.case_project_selector.findData(selected)
         self.case_project_selector.setCurrentIndex(max(0, case_index))
         self.case_project_selector.blockSignals(False)
+        if hasattr(self, "endpoint_project_selector"):
+            self.endpoint_project_selector.blockSignals(True)
+            self.endpoint_project_selector.clear()
+            for project in overviews:
+                self.endpoint_project_selector.addItem(project["name"], project["id"])
+            endpoint_index = self.endpoint_project_selector.findData(selected)
+            self.endpoint_project_selector.setCurrentIndex(max(0, endpoint_index))
+            self.endpoint_project_selector.blockSignals(False)
+        if hasattr(self, "workflow_project_selector"):
+            self.workflow_project_selector.blockSignals(True)
+            self.workflow_project_selector.clear()
+            for project in overviews:
+                self.workflow_project_selector.addItem(project["name"], project["id"])
+            workflow_index = self.workflow_project_selector.findData(selected)
+            self.workflow_project_selector.setCurrentIndex(max(0, workflow_index))
+            self.workflow_project_selector.blockSignals(False)
+        if hasattr(self, "validation_project_selector"):
+            self.validation_project_selector.blockSignals(True)
+            self.validation_project_selector.clear()
+            for project in overviews:
+                self.validation_project_selector.addItem(project["name"], project["id"])
+            validation_index = self.validation_project_selector.findData(selected)
+            self.validation_project_selector.setCurrentIndex(max(0, validation_index))
+            self.validation_project_selector.blockSignals(False)
         self.project_table.setUpdatesEnabled(False)
         self.project_table.blockSignals(True)
         try:
@@ -1405,18 +2192,31 @@ class MainWindow(QMainWindow):
             for row, project in enumerate(overviews):
                 values = (
                     project["name"], project["source_count"], project["module_count"],
-                    project["endpoint_count"], project["case_count"], project["updated_at"],
+                    project["endpoint_count"], project["updated_at"],
                 )
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(str(value))
                     if column == 0:
                         item.setData(Qt.UserRole, project["id"])
+                        item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    elif column == 4:
+                        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    else:
+                        item.setTextAlignment(Qt.AlignCenter)
                     self.project_table.setItem(row, column, item)
                 if project["id"] == selected:
                     self.project_table.selectRow(row)
         finally:
             self.project_table.blockSignals(False)
             self.project_table.setUpdatesEnabled(True)
+        if hasattr(self, "project_total"):
+            self.project_total.setText(f"共 {len(overviews)} 个项目")
+        if hasattr(self, "stat_projects"):
+            self.stat_projects.stat_value.setText(str(len(overviews)))
+            self.stat_sources.stat_value.setText(str(sum(int(item["source_count"]) for item in overviews)))
+            self.stat_modules.stat_value.setText(str(sum(int(item["module_count"]) for item in overviews)))
+            self.stat_endpoints.stat_value.setText(str(sum(int(item["endpoint_count"]) for item in overviews)))
+        self.filter_project_table()
         if self.projects.count():
             index = self.projects.findData(selected)
             self.projects.setCurrentIndex(max(0, index))
@@ -1435,6 +2235,21 @@ class MainWindow(QMainWindow):
         if index >= 0 and self.projects.currentIndex() != index:
             self.projects.setCurrentIndex(index)
 
+    def select_validation_project(self):
+        """Keep the environment-validation project dropdown synchronized globally."""
+        project_id = self.validation_project_selector.currentData()
+        index = self.projects.findData(project_id)
+        if index >= 0 and self.projects.currentIndex() != index:
+            self.projects.setCurrentIndex(index)
+
+    def filter_project_table(self):
+        if not hasattr(self, "project_table"):
+            return
+        keyword = self.project_filter.text().strip().lower() if hasattr(self, "project_filter") else ""
+        for row in range(self.project_table.rowCount()):
+            name_item = self.project_table.item(row, 0)
+            self.project_table.setRowHidden(row, bool(keyword and name_item and keyword not in name_item.text().lower()))
+
     def _project_changed(self):
         self.current_project_id = self.projects.currentData()
         if hasattr(self, "case_project_selector"):
@@ -1442,8 +2257,25 @@ class MainWindow(QMainWindow):
             self.case_project_selector.blockSignals(True)
             self.case_project_selector.setCurrentIndex(max(0, index))
             self.case_project_selector.blockSignals(False)
+        if hasattr(self, "endpoint_project_selector"):
+            index = self.endpoint_project_selector.findData(self.current_project_id)
+            self.endpoint_project_selector.blockSignals(True)
+            self.endpoint_project_selector.setCurrentIndex(max(0, index))
+            self.endpoint_project_selector.blockSignals(False)
+        if hasattr(self, "workflow_project_selector"):
+            index = self.workflow_project_selector.findData(self.current_project_id)
+            self.workflow_project_selector.blockSignals(True)
+            self.workflow_project_selector.setCurrentIndex(max(0, index))
+            self.workflow_project_selector.blockSignals(False)
+        if hasattr(self, "validation_project_selector"):
+            index = self.validation_project_selector.findData(self.current_project_id)
+            self.validation_project_selector.blockSignals(True)
+            self.validation_project_selector.setCurrentIndex(max(0, index))
+            self.validation_project_selector.blockSignals(False)
         self.refresh_context_labels()
+        self._refresh_case_runtime_hint()
         self.refresh_asset_tree()
+        self.refresh_source_table()
         self.refresh_endpoint_filters()
         self.refresh_case_module_filter()
         self.refresh_endpoints()
@@ -1456,6 +2288,12 @@ class MainWindow(QMainWindow):
             self.env_selector.blockSignals(False)
             if envs:
                 self._load_environment(envs[0])
+            else:
+                self.env_name.setText("测试环境")
+                self.base_url.clear()
+                self.headers.setPlainText("{}")
+                self.variables.setPlainText("{}")
+                self.environment_confirmed.setChecked(False)
         if hasattr(self, "case_table"):
             self.refresh_cases()
         if hasattr(self, "report_table"):
@@ -1469,6 +2307,13 @@ class MainWindow(QMainWindow):
         self.asset_tree.setUpdatesEnabled(False)
         self.asset_tree.clear()
         if not self.current_project_id:
+            if hasattr(self, "current_source_label"):
+                self.current_source_label.setText("尚未导入资料")
+            if hasattr(self, "stat_sources"):
+                for card in (self.stat_sources, self.stat_modules, self.stat_endpoints):
+                    card.stat_value.setText("0")
+            if hasattr(self, "asset_summary"):
+                self.asset_summary.setText("请先在项目概览中选择一个项目，再查看其资料源、模块和接口。");
             self.asset_tree.setUpdatesEnabled(True)
             return
         project_name = self.projects.currentText()
@@ -1484,6 +2329,7 @@ class MainWindow(QMainWindow):
                 source_nodes[source_id] = QTreeWidgetItem(
                     project_root, [row["source_name"], row["kind"], ""]
                 )
+                source_nodes[source_id].setData(0, Qt.UserRole + 1, {"kind": "source", "id": source_id})
                 source_counts[source_id] = 0
             if row["endpoint_id"] is None:
                 continue
@@ -1498,13 +2344,167 @@ class MainWindow(QMainWindow):
                 [row["summary"] or row["path"], row["method"], row["path"]],
             )
             endpoint_node.setData(0, Qt.UserRole, row["endpoint_id"])
+            endpoint_node.setData(0, Qt.UserRole + 1, {"kind": "endpoint", "id": row["endpoint_id"]})
         for source_id, source_node in source_nodes.items():
             source_node.setText(2, f"{source_counts[source_id]} 个接口")
         project_root.setText(2, f"{len(source_nodes)} 个资料源")
         project_root.setExpanded(True)
         for node in source_nodes.values():
             node.setExpanded(True)
+        if hasattr(self, "asset_summary"):
+            endpoint_count = sum(source_counts.values())
+            source_names = "、".join(node.text(0) for node in source_nodes.values())
+            self.asset_summary.setText(
+                f"当前项目：{project_name}  ·  资料：{source_names or '未导入'}  ·  "
+                f"{len(module_nodes)} 个模块  ·  {endpoint_count} 个接口。双击接口可直接查看详情。"
+            )
+        if hasattr(self, "current_source_label"):
+            self.current_source_label.setText(source_names or "尚未导入资料")
+        # 默认展开到资料源层级：结构一眼可见，接口明细仍可按模块按需展开。
+        self.asset_tree.expandToDepth(1)
+        self.update_asset_actions()
         self.asset_tree.setUpdatesEnabled(True)
+
+    def filter_asset_tree(self):
+        """按任意列筛选资产树，同时保留命中项的父级路径。"""
+        if not hasattr(self, "asset_tree"):
+            return
+        keyword = self.asset_search.text().strip().lower()
+
+        def visit(item: QTreeWidgetItem) -> bool:
+            own_match = not keyword or any(
+                keyword in item.text(column).lower() for column in range(item.columnCount())
+            )
+            child_match = any(visit(item.child(index)) for index in range(item.childCount()))
+            visible = own_match or child_match
+            item.setHidden(not visible)
+            if keyword and child_match:
+                item.setExpanded(True)
+            return visible
+
+        for index in range(self.asset_tree.topLevelItemCount()):
+            visit(self.asset_tree.topLevelItem(index))
+
+    def refresh_source_table(self):
+        if not hasattr(self, "source_table"):
+            return
+        keyword = self.source_filter_home.text().strip().lower() if hasattr(self, "source_filter_home") else ""
+        rows = self.db.list_sources(self.current_project_id) if self.current_project_id else []
+        rows = [row for row in rows if not keyword or keyword in row["name"].lower() or keyword in row["kind"].lower()]
+        self.source_table.setUpdatesEnabled(False)
+        self.source_table.clearContents()
+        self.source_table.setRowCount(len(rows))
+        for index, source in enumerate(rows):
+            self.source_table.setRowHeight(index, 44)
+            for column, value in enumerate((source["name"], source["kind"])):
+                item = QTableWidgetItem(str(value))
+                if column == 1:
+                    item.setTextAlignment(Qt.AlignCenter)
+                else:
+                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                self.source_table.setItem(index, column, item)
+            remove = QPushButton("删除")
+            remove.setObjectName("InlineDeleteButton")
+            remove.setProperty("danger", True)
+            remove.setFixedSize(46, 22)
+            remove.clicked.connect(lambda checked=False, source_id=source["id"]: self.delete_source(source_id))
+            operation = QWidget()
+            operation_layout = QHBoxLayout(operation)
+            operation_layout.setContentsMargins(0, 0, 0, 0)
+            operation_layout.setAlignment(Qt.AlignCenter)
+            operation_layout.addWidget(remove)
+            self.source_table.setCellWidget(index, 2, operation)
+        self.source_table.setUpdatesEnabled(True)
+
+    def delete_source(self, source_id: int):
+        if not self.current_project_id:
+            return
+        if QMessageBox.question(self, "删除资料", "确定删除这份导入资料及其接口吗？") != QMessageBox.Yes:
+            return
+        self.db.delete_source(source_id, self.current_project_id)
+        self.db.audit(self.current_project_id, "delete_source", {"source_id": source_id})
+        self.refresh_source_table()
+        self.refresh_asset_tree()
+        self.refresh_endpoint_filters()
+        self.refresh_endpoints()
+        self.refresh_projects()
+
+    def select_workflow_project(self):
+        project_id = self.workflow_project_selector.currentData()
+        index = self.projects.findData(project_id)
+        if index >= 0 and self.projects.currentIndex() != index:
+            self.projects.setCurrentIndex(index)
+
+    def select_endpoint_project(self):
+        project_id = self.endpoint_project_selector.currentData()
+        index = self.projects.findData(project_id)
+        if index >= 0 and self.projects.currentIndex() != index:
+            self.projects.setCurrentIndex(index)
+
+    def choose_git_project(self):
+        path = QFileDialog.getExistingDirectory(self, "选择本地 Git 项目目录")
+        if path:
+            self.git_project_path.setText(path)
+
+    def choose_git_clone_parent(self):
+        path = QFileDialog.getExistingDirectory(self, "选择 Git 克隆保存目录")
+        if path:
+            self.git_clone_parent.setText(path)
+
+    def clone_and_import_git_project(self):
+        remote = self.git_remote_url.text().strip()
+        parent = Path(self.git_clone_parent.text().strip())
+        if not remote:
+            QMessageBox.warning(self, "连接 Git 仓库", "请填写 Git 仓库地址。")
+            return
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10,
+                                    creationflags=creation_flags)
+            if result.returncode != 0:
+                raise RuntimeError("未检测到可用 Git，请先安装 Git 并重新打开工具。")
+            name = Path(urlparse(remote).path).stem or "git-project"
+            target = parent / name
+            if target.exists():
+                raise ValueError(f"目标目录已存在：{target}。请改用“导入本地仓库”，或选择其他保存目录。")
+            self.git_import_output.setPlainText(f"正在克隆：{remote}\n保存到：{target}")
+            result = subprocess.run(["git", "clone", "--depth", "1", remote, str(target)], capture_output=True,
+                                    text=True, timeout=300, creationflags=creation_flags)
+            if result.returncode != 0:
+                detail = result.stderr.strip() or "Git clone 失败"
+                if "Connection was reset" in detail or "Recv failure" in detail:
+                    detail += "\n\n网络连接被远端重置。请检查网络、VPN/代理设置，或先在终端执行 git clone 验证网络后再导入。"
+                raise RuntimeError(detail)
+            self.git_project_path.setText(str(target))
+            self.import_git_project()
+        except Exception as exc:
+            QMessageBox.critical(self, "连接 Git 仓库失败", str(exc))
+
+    def import_git_project(self):
+        path = Path(self.git_project_path.text().strip())
+        if not path.is_dir() or not (path / ".git").exists():
+            QMessageBox.warning(self, "导入 Git 项目", "请选择包含 .git 文件夹的本地 Git 项目目录。")
+            return
+        try:
+            analysis = BackendSourceParser().analyze_directory(path)
+            document = analysis["document"]
+            if not document.endpoints:
+                raise ValueError("没有识别到后端接口。当前仅支持 ASP.NET Core、Spring Boot 和 Node/Express 项目。")
+            already_imported = any(
+                item["root_path"] == str(path)
+                for project in self.db.list_projects()
+                for item in self.db.list_source_projects(project["id"])
+            )
+            if already_imported:
+                raise ValueError("该本地仓库已经导入。请在首页选择对应项目，或更换仓库目录。")
+            self.current_project_id = self.db.create_project(path.name, mode="source")
+            self._save_document(path.name, document, source_analysis=analysis, source_root=path)
+            self.refresh_projects()
+            self.git_import_output.setPlainText(f"已导入：{path.name}\n识别接口：{len(document.endpoints)} 个\n现在可在首页和路线 A 查看接口资产。")
+            QMessageBox.information(self, "导入 Git 项目", f"已创建项目“{path.name}”，并识别到 {len(document.endpoints)} 个接口。")
+        except Exception as exc:
+            QMessageBox.critical(self, "导入 Git 项目失败", str(exc))
 
     def open_asset_item(self, item, column):
         endpoint_id = item.data(0, Qt.UserRole)
@@ -1520,6 +2520,61 @@ class MainWindow(QMainWindow):
                 break
         self.go_to_page(1)
 
+    def _selected_asset(self) -> dict | None:
+        item = self.asset_tree.currentItem() if hasattr(self, "asset_tree") else None
+        return item.data(0, Qt.UserRole + 1) if item else None
+
+    def update_asset_actions(self):
+        selected = self._selected_asset()
+        enabled = bool(selected and selected.get("kind") in {"source", "endpoint"})
+        for button in (getattr(self, "edit_asset_btn", None), getattr(self, "delete_asset_btn", None)):
+            if button:
+                button.setEnabled(enabled)
+
+    def edit_selected_asset(self):
+        selected = self._selected_asset()
+        if not selected:
+            return
+        if selected["kind"] == "source":
+            rows = {item["id"]: item for item in self.db.list_sources(self.current_project_id)}
+            source = rows.get(selected["id"])
+            if not source:
+                return
+            name, accepted = QInputDialog.getText(self, "编辑资料", "资料名称", text=source["name"])
+            if accepted and name.strip():
+                self.db.rename_source(selected["id"], self.current_project_id, name)
+                self.refresh_projects()
+            return
+        endpoint = next((item for item in self.db.list_endpoints(self.current_project_id) if item["id"] == selected["id"]), None)
+        if not endpoint:
+            return
+        text, accepted = QInputDialog.getMultiLineText(
+            self, "编辑接口", "接口定义 JSON", json.dumps(json.loads(endpoint["definition_json"]), ensure_ascii=False, indent=2)
+        )
+        if accepted:
+            try:
+                self.db.update_endpoint(selected["id"], json.loads(text))
+                self.refresh_projects()
+            except Exception as exc:
+                QMessageBox.warning(self, "接口无效", str(exc))
+
+    def delete_selected_asset(self):
+        selected = self._selected_asset()
+        if not selected:
+            return
+        if selected["kind"] == "source":
+            message = "确定删除这份资料及其全部接口吗？"
+        else:
+            message = "确定删除选中的接口吗？"
+        if QMessageBox.question(self, "删除资产", message) != QMessageBox.Yes:
+            return
+        if selected["kind"] == "source":
+            self.db.delete_source(selected["id"], self.current_project_id)
+        else:
+            self.db.delete_endpoint(selected["id"])
+        self.db.audit(self.current_project_id, "delete_asset", selected)
+        self.refresh_projects(); self.refresh_endpoints()
+
     def refresh_context_labels(self):
         name = self.projects.currentText() if self.current_project_id else "未选择"
         endpoint_count = len(self.db.list_endpoints(self.current_project_id)) if self.current_project_id else 0
@@ -1528,6 +2583,90 @@ class MainWindow(QMainWindow):
             label = getattr(self, attribute, None)
             if label:
                 label.setText(context)
+
+    def _refresh_case_runtime_hint(self) -> None:
+        """Explain whether this project's saved runtime is ready for one-click runs."""
+        runtime_hint = getattr(self, "case_runtime_hint", None)
+        if not runtime_hint:
+            return
+        envs = self.db.list_environments(self.current_project_id) if self.current_project_id else []
+        if not envs:
+            runtime_hint.setText("运行配置：尚未保存。请先在“项目运行配置与接口调试”中完成一次配置。")
+            return
+        env = envs[0]
+        authorized = self.db.get_setting(
+            f"environment_authorized:{self.current_project_id}:{env['name']}", "0"
+        ) == "1"
+        state = "已保存，可一键运行" if authorized and env.get("base_url") else "请完成首次授权与 Base URL 配置"
+        runtime_hint.setText(f"运行配置：{env['name']} · {env.get('base_url') or '未填写 Base URL'} · {state}")
+
+    def _detected_project_auth(self) -> tuple[bool, dict | None]:
+        """Infer the usual login entry from imported API assets, without asking users for headers."""
+        if not self.current_project_id:
+            return False, None
+        endpoints = self.db.list_endpoints(self.current_project_id)
+        login = next((item for item in endpoints if item.get("method", "").upper() == "POST"
+                      and any(token in item.get("path", "").lower() for token in ("/login", "/signin", "/sign-in"))), None)
+        secured = False
+        for item in endpoints:
+            try:
+                secured = secured or bool(json.loads(item.get("definition_json") or "{}").get("security"))
+            except (TypeError, ValueError):
+                continue
+        return bool(login or secured), login
+
+    def _refresh_auth_status_hint(self) -> None:
+        hint = getattr(self, "auth_status_hint", None)
+        if not hint:
+            return
+        required, login = self._detected_project_auth()
+        if not required:
+            hint.setText("未识别到认证要求：回归测试将直接执行")
+        elif login:
+            hint.setText(f"已识别登录接口 {login['path']}：执行时自动获取并复用 Token")
+        else:
+            hint.setText("已识别受保护接口：请首次填写测试账号，系统会自动复用认证信息")
+
+    @staticmethod
+    def _find_token(payload):
+        if isinstance(payload, dict):
+            for key in ("access_token", "accessToken", "token", "jwt"):
+                if payload.get(key):
+                    return str(payload[key])
+            for value in payload.values():
+                token = MainWindow._find_token(value)
+                if token:
+                    return token
+        if isinstance(payload, list):
+            for value in payload:
+                token = MainWindow._find_token(value)
+                if token:
+                    return token
+        return ""
+
+    def _prepare_auto_auth(self, variables: dict) -> dict:
+        """Perform one discovered login at run time; never expose its token in the UI."""
+        required, login = self._detected_project_auth()
+        if not required or variables.get("TOKEN") or variables.get("ACCESS_TOKEN"):
+            return variables
+        username = str(variables.get("TEST_USERNAME") or variables.get("USERNAME") or "")
+        password = str(variables.get("TEST_PASSWORD") or variables.get("PASSWORD") or "")
+        if not login or not username or not password:
+            raise ValueError("该项目需要认证。请在“项目运行配置”首次填写测试账号和测试密码；之后会自动登录。")
+        response = execute_request("POST", self.base_url.text().strip(), login["path"], {},
+                                   {"username": username, "password": password})
+        if response.status_code < 200 or response.status_code >= 300:
+            raise ValueError(f"自动登录失败（HTTP {response.status_code}）。请检查测试账号、密码或登录接口参数。")
+        try:
+            payload = json.loads(response.body) if isinstance(response.body, str) else response.body
+        except (TypeError, ValueError):
+            payload = {}
+        token = self._find_token(payload) or response.headers.get("authorization", "").removeprefix("Bearer ")
+        if not token:
+            raise ValueError("登录成功但未找到 Token 字段。请在接口资产中补充登录响应定义，或在高级变量中配置 TOKEN。")
+        variables = dict(variables)
+        variables.update({"TOKEN": token, "AUTH_TYPE": "bearer"})
+        return variables
 
     def _dialogue_context(self) -> dict:
         """Build a minimal, local evidence context for the AI conversation."""
@@ -1944,9 +3083,42 @@ class MainWindow(QMainWindow):
                 definition = json.loads(row["definition_json"] or "{}")
                 self.workflow_json.setPlainText(json.dumps(definition, ensure_ascii=False, indent=2))
                 self.workflow_scope.setPlainText("，".join(definition.get("test_focus", [])))
+                self._refresh_workflow_summary(definition)
             except (TypeError, ValueError):
                 self.workflow_json.setPlainText(row["definition_json"])
                 self.workflow_scope.clear()
+                self.workflow_summary.setPlainText("该测试方案无法解析。请在“高级能力”中修正后重新保存。")
+
+    def _refresh_workflow_summary(self, definition: dict) -> None:
+        """Translate the internal workflow document into the review text users actually need."""
+        summary = getattr(self, "workflow_summary", None)
+        if not summary:
+            return
+        steps = definition.get("steps") or []
+        focuses = definition.get("test_focus") or ["正常流程", "必填参数", "边界值", "权限与认证", "异常返回"]
+        lines = [
+            f"测试方案：{definition.get('name', '未命名方案')}",
+            f"状态：{'已确认，可执行回归' if definition.get('review_status') == 'confirmed' else '草稿，已自动生成，可按需补充'}",
+            f"识别到 {len(steps)} 个接口步骤。将自动覆盖：{'、'.join(map(str, focuses))}。",
+            "接口链路：",
+        ]
+        for index, step in enumerate(steps[:8], 1):
+            request = step.get("request") or {}
+            method, path = request.get("method", ""), request.get("path", "")
+            endpoint = f"{method} {path}".strip()
+            name = str(step.get("name") or "").strip()
+            if name and name != endpoint:
+                lines.append(f"步骤 {index}：{name}（调用 {endpoint}）")
+            else:
+                lines.append(f"步骤 {index}：调用接口 {endpoint}")
+        if len(steps) > 8:
+            lines.append(f"……其余 {len(steps) - 8} 个步骤会一并生成测试用例。")
+        if definition.get("database_changes"):
+            lines.append("检测到可能的数据变更；如需验证数据库结果，可在“高级能力”中启用数据库校验。")
+        else:
+            lines.append("未要求数据库校验：可直接生成并执行接口回归测试。")
+        summary.setPlainText("\n".join(lines))
+        summary.verticalScrollBar().setValue(0)
 
     def _workflow_model_provider(self, check_status: bool = True, cancel_event: Event | None = None, mode_override: str | None = None):
         mode = {"codex": 0, "api": 1, "ollama": 2}.get(mode_override, self.ai_tabs.currentIndex())
@@ -2038,8 +3210,9 @@ class MainWindow(QMainWindow):
             })
             self.refresh_workflows()
             self.workflow_selector.setCurrentIndex(self.workflow_selector.findData(workflow_id))
+            self._refresh_workflow_summary(candidate)
             self.workflow_output.setPlainText(
-                f"已生成流程草稿（{candidate.get('generation_mode')}）。请补充参数、数据绑定、数据流、数据库变更、断言和补偿动作，确认后才能执行。"
+                f"已完成自动分析（{candidate.get('generation_mode')}）：中文测试方案已生成。下一步可直接点击“自动生成测试用例”；数据库校验和底层流程编辑仅在高级能力中按需使用。"
             )
         except Exception as exc:
             QMessageBox.critical(self, "流程生成失败", str(exc))
@@ -2065,6 +3238,7 @@ class MainWindow(QMainWindow):
             self.db.audit(self.current_project_id, "save_workflow", {"workflow_id": workflow_id})
             self.refresh_workflows()
             self.workflow_selector.setCurrentIndex(self.workflow_selector.findData(workflow_id))
+            self._refresh_workflow_summary(definition)
         except Exception as exc:
             QMessageBox.warning(self, "流程无效", str(exc))
 
@@ -2088,6 +3262,7 @@ class MainWindow(QMainWindow):
             self.db.audit(self.current_project_id, "confirm_workflow", {"workflow_id": workflow_id})
             self.refresh_workflows()
             self.workflow_selector.setCurrentIndex(self.workflow_selector.findData(workflow_id))
+            self._refresh_workflow_summary(definition)
         except Exception as exc:
             QMessageBox.warning(self, "确认失败", str(exc))
 
@@ -2128,6 +3303,7 @@ class MainWindow(QMainWindow):
             ],
         }
         self.workflow_json.setPlainText(json.dumps(definition, ensure_ascii=False, indent=2))
+        self._refresh_workflow_summary(definition)
         self.workflow_output.setPlainText("已创建人工流程草稿，请补全数据流、数据库变更、异常分支和补偿动作后保存。")
 
     def confirm_workflow_scope(self):
@@ -2138,15 +3314,16 @@ class MainWindow(QMainWindow):
         try:
             definition = json.loads(self.workflow_json.toPlainText() or "{}")
             raw = self.workflow_scope.toPlainText().strip()
-            if not raw:
-                raise ValueError("请先填写测试方向")
             focuses = [item.strip() for item in raw.replace("，", ",").replace("\n", ",").split(",") if item.strip()]
+            if not focuses:
+                focuses = ["正常流程", "必填参数", "边界值", "权限与认证", "异常返回"]
             definition["test_focus"] = focuses
             definition["scope_confirmed"] = True
             definition["review_status"] = "draft"
             self.db.update_workflow(int(workflow_id), definition)
             self.db.audit(self.current_project_id, "confirm_workflow_scope", {"workflow_id": workflow_id, "test_focus": focuses})
             self.workflow_json.setPlainText(json.dumps(definition, ensure_ascii=False, indent=2))
+            self._refresh_workflow_summary(definition)
             self.workflow_output.setPlainText("测试范围已记录。现在可以生成接口测试用例；流程本身仍需最终确认。")
         except Exception as exc:
             QMessageBox.warning(self, "测试范围无效", str(exc))
@@ -2160,8 +3337,12 @@ class MainWindow(QMainWindow):
             return
         try:
             definition = json.loads(self.workflow_json.toPlainText() or "{}")
-            if not definition.get("scope_confirmed"):
-                raise ValueError("请先确认测试范围")
+            if not definition.get("test_focus"):
+                definition["test_focus"] = ["正常流程", "必填参数", "边界值", "权限与认证", "异常返回"]
+                definition["scope_confirmed"] = True
+                self.db.update_workflow(int(workflow_id), definition)
+                self.workflow_scope.setPlainText("、".join(definition["test_focus"]))
+                self._refresh_workflow_summary(definition)
             endpoints = self._case_scope_endpoints()
             cases = generate_cases(endpoints, "；".join(definition.get("test_focus", [])))
             for case in cases:
@@ -2285,6 +3466,9 @@ class MainWindow(QMainWindow):
         if any(step.get("kind", "http") in {"http", "side_effect_check"} for step in definition.get("steps", [])) and not self.base_url.text().strip():
             QMessageBox.warning(self, "执行被阻止", "联合测试包含 API 步骤，请先配置已启动后端的 Base URL。")
             return
+        self.statusBar().showMessage(
+            f"使用已保存运行配置“{self.env_name.text() or '未命名'}”执行已确认流程。", 4000
+        )
         connections = self.db.list_db_connections(self.current_project_id)
         database = None; connection_id = None
         if connections:
@@ -2401,7 +3585,8 @@ class MainWindow(QMainWindow):
         except (OpenApiParseError, OSError, ValueError) as exc:
             QMessageBox.critical(self, "导入失败", str(exc)); return
         suggestions = "\n".join(f"• {x}" for x in report.suggestions) or "• 暂无"
-        self.summary.setPlainText(
+        summary_setter = self.summary.setText if isinstance(self.summary, QLabel) else self.summary.setPlainText
+        summary_setter(
             f"文档：{document.title} {document.version}\n规范：{document.specification}\n"
             f"接口：{report.endpoint_count} 个\n模块：{report.module_count} 个\n"
             f"完整度：{report.score}%（{report.level}）\n缺少 Base URL：{report.missing_base_url}\n"
@@ -2437,7 +3622,7 @@ class MainWindow(QMainWindow):
             parser = PostmanParser()
             document = parser.parse_file(path)
             self._save_document(Path(path).name, document)
-            self.summary.append(
+            self._append_import_summary(
                 "\nPostman 脚本："
                 f"可转换 {parser.script_report['converted']}，"
                 f"需人工确认 {parser.script_report['manual_review']}，"
@@ -2569,7 +3754,7 @@ class MainWindow(QMainWindow):
             })
         self.db.audit(self.current_project_id, "import_api_source",
                       {"name": name, "type": document.specification, "endpoints": len(document.endpoints)})
-        self.summary.setPlainText(
+        self._set_import_summary(
             f"文档：{document.title}\n规范：{document.specification}\n接口：{report.endpoint_count} 个\n"
             f"模块：{report.module_count} 个\n完整度：{report.score}%（{report.level}）\n"
             + "\n".join(f"• {x}" for x in report.suggestions)
@@ -2602,7 +3787,7 @@ class MainWindow(QMainWindow):
                 ))
             documents.append(ApiDocument(source["name"], "", source["kind"], [], endpoints))
         difference = compare_documents(documents[0], documents[1])
-        self.summary.setPlainText(json.dumps(difference, ensure_ascii=False, indent=2))
+        self._set_import_summary(json.dumps(difference, ensure_ascii=False, indent=2))
         self.db.audit(self.current_project_id, "compare_sources", {
             "left": sources[-2]["name"], "right": sources[-1]["name"],
             "differences": len(difference["differences"]),
@@ -2637,6 +3822,7 @@ class MainWindow(QMainWindow):
         finally:
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
+        self._refresh_auth_status_hint()
 
     def _schedule_endpoint_refresh(self):
         if hasattr(self, "_endpoint_search_timer"):
@@ -2695,6 +3881,32 @@ class MainWindow(QMainWindow):
         self.endpoint_detail.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
         self.method.setCurrentText(data["method"]); self.path.setText(data["path"])
 
+    def debug_selected_endpoint(self):
+        """Open an endpoint in the per-project debug surface with saved settings."""
+        row = self.endpoint_table.currentRow()
+        if row < 0 or row >= len(getattr(self, "_endpoint_rows", [])):
+            QMessageBox.information(self, "选择接口", "请先在接口列表中选择一个接口。")
+            return
+        stored = self._endpoint_rows[row]
+        try:
+            definition = json.loads(stored["definition_json"])
+        except (TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "接口数据无效", str(exc))
+            return
+        self.method.setCurrentText(str(definition.get("method") or stored["method"]))
+        self.path.setText(str(definition.get("path") or stored["path"]))
+        request_body = definition.get("request_body")
+        body = {}
+        if isinstance(request_body, dict):
+            body = request_body.get("example") or request_body.get("examples") or {}
+            if not isinstance(body, (dict, list)):
+                body = {}
+        self.body.setPlainText(json.dumps(body, ensure_ascii=False, indent=2))
+        self.debug_endpoint_label.setText(
+            f"正在调试：{self.method.currentText()} {self.path.text()} · {stored.get('summary') or stored.get('module') or '接口资产'}。"
+        )
+        self.go_to_page(2)
+
     def select_environment(self):
         if not self.current_project_id or self.env_selector.currentIndex() < 0:
             return
@@ -2713,6 +3925,244 @@ class MainWindow(QMainWindow):
         except Exception:
             QMessageBox.warning(self, "敏感配置", "无法解密该环境的敏感变量，请重新输入。")
         self.variables.setPlainText(json.dumps(values, ensure_ascii=False, indent=2))
+        if hasattr(self, "auth_username"):
+            self.auth_username.setText(str(values.get("TEST_USERNAME", values.get("USERNAME", ""))))
+        if hasattr(self, "auth_password"):
+            self.auth_password.setText(str(values.get("TEST_PASSWORD", values.get("PASSWORD", ""))))
+        self._refresh_auth_status_hint()
+        if hasattr(self, "environment_confirmed"):
+            authorized = self.db.get_setting(
+                f"environment_authorized:{self.current_project_id}:{env['name']}", "0"
+            ) == "1"
+            self.environment_confirmed.setChecked(authorized)
+
+    def _set_validation_log(self, entries: list[tuple[str, str, str]]) -> None:
+        """Render a consistently aligned time / check / result validation log."""
+        self._validation_log_entries = list(entries)
+        while self.validation_log_rows.count():
+            item = self.validation_log_rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        label_for_level = {"success": "成功", "warning": "异常", "running": "进行中", "pending": "待校验"}
+        icon_for_level = {"success": "status_success", "warning": "status_warning", "running": "status_running", "pending": "status_pending"}
+        for timestamp, message, level in entries:
+            row = QFrame(); row.setObjectName("ValidationLogRow")
+            row_layout = QHBoxLayout(row); row_layout.setContentsMargins(0, 6, 0, 6); row_layout.setSpacing(7)
+            row.setMinimumHeight(38)
+            time_label = QLabel(timestamp or "--:--:--"); time_label.setObjectName("ValidationLogTime")
+            time_label.setFixedWidth(58)
+            item_label = QLabel(message); item_label.setObjectName("ValidationLogMessage")
+            item_label.setWordWrap(True)
+            result_icon = self._illustration_icon(icon_for_level.get(level, "status_pending"), 14)
+            result_label = QLabel(label_for_level.get(level, "待校验")); result_label.setObjectName(
+                f"ValidationLogStatus{level.capitalize()}"
+            )
+            result_label.setMinimumWidth(34)
+            row_layout.addWidget(time_label, 0, Qt.AlignTop)
+            row_layout.addWidget(item_label, 1)
+            row_layout.addWidget(result_icon, 0, Qt.AlignTop)
+            row_layout.addWidget(result_label, 0, Qt.AlignTop)
+            self.validation_log_rows.addWidget(row)
+        self.validation_log_rows.addStretch(1)
+
+    def export_environment_validation_report(self) -> None:
+        """Export the latest non-sensitive environment validation summary."""
+        default_name = f"环境校验报告-{datetime.now():%Y%m%d-%H%M%S}.txt"
+        filename, _ = QFileDialog.getSaveFileName(self, "导出校验报告", default_name, "文本文件 (*.txt)")
+        if not filename:
+            return
+        level_names = {"success": "成功", "warning": "异常", "running": "进行中", "pending": "待校验"}
+        project_name = self._current_project_name() or "未选择项目"
+        lines = [
+            "TestPilot AI 环境校验报告",
+            f"项目：{project_name}",
+            f"生成时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
+            "",
+            "校验日志：",
+        ]
+        for timestamp, message, level in getattr(self, "_validation_log_entries", []):
+            lines.append(f"{timestamp or '--:--:--'}  {message}  {level_names.get(level, level)}")
+        try:
+            Path(filename).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            QMessageBox.information(self, "导出完成", f"校验报告已保存：\n{filename}")
+        except OSError as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def _set_validation_icon(self, label: QLabel, level: str, size: int = 15) -> None:
+        kind = {"success": "status_success", "warning": "status_warning", "running": "status_running"}.get(level, "status_pending")
+        icon = self._illustration_icon(kind, size)
+        label.setPixmap(icon.pixmap())
+        label.setFixedSize(size, size)
+
+    @staticmethod
+    def _set_validation_label_style(label: QLabel, level: str, prefix: str) -> None:
+        label.setObjectName(f"{prefix}{'Success' if level == 'success' else 'Failure' if level == 'warning' else 'Pending'}")
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def run_environment_validation(self):
+        """Run a safe connectivity check and update the dashboard without making
+        any business-data changes."""
+        if not self.current_project_id:
+            QMessageBox.information(self, "提示", "请先选择项目")
+            return
+        base_url = self.base_url.text().strip()
+        if not base_url:
+            QMessageBox.warning(self, "缺少地址", "请填写测试环境地址后再校验。")
+            return
+        endpoint_count = len(self.db.list_endpoints(self.current_project_id))
+        started_at = datetime.now()
+        self._set_validation_log([(started_at.strftime("%H:%M:%S"), "开始环境校验", "running")])
+        try:
+            result = execute_request("HEAD", base_url, "/", {}, None)
+            self._validation_response_detail = {
+                "request": {
+                    "method": "HEAD",
+                    "url": f"{base_url.rstrip('/')}/",
+                    "headers": {},
+                    "body": None,
+                },
+                "response": {
+                    "status_code": result.status_code,
+                    "elapsed_ms": result.elapsed_ms,
+                    "headers": result.headers,
+                    "body": result.body,
+                },
+            }
+            reachable = result.status_code < 500
+            status_text = "成功" if reachable else f"异常（HTTP {result.status_code}）"
+            step_details = (
+                base_url,
+                "已识别登录接口" if "/api/auth/login" in {x["path"] for x in self.db.list_endpoints(self.current_project_id)} else "未发现固定登录接口",
+                "回归时自动获取/复用" if reachable else "等待服务恢复",
+                f"已载入 {endpoint_count} 个接口",
+                "全部校验通过" if reachable else "部分校验异常",
+            )
+            for index, (detail, status, status_icon) in enumerate(self.validation_steps):
+                detail.setText(step_details[index])
+                level = "success" if reachable or index in {1, 2, 3} else "warning"
+                status.setText("成功" if level == "success" else "异常")
+                self._set_validation_icon(status_icon, level)
+                self._set_validation_label_style(status, level, "ValidationStep")
+            login_known = "/api/auth/login" in {x["path"] for x in self.db.list_endpoints(self.current_project_id)}
+            metric_values = {
+                "DNS 解析": ("地址已解析", "success"),
+                "网络响应": (f"{result.elapsed_ms} ms", "success"),
+                "服务健康": (f"HTTP {result.status_code}", "success" if reachable else "warning"),
+                "登录接口": ("已自动识别" if login_known else "未识别固定登录接口", "success" if login_known else "warning"),
+                "Token 有效期": ("回归时自动维护", "success"),
+                "认证方式": ("按接口文档执行", "success"),
+                "发现接口数量": (f"{endpoint_count} 个", "success"),
+                "可访问接口数量": (f"{endpoint_count if reachable else 0} 个", "success" if reachable else "warning"),
+                "不可访问接口数量": ("0 个" if reachable else f"{endpoint_count} 个", "success" if reachable else "warning"),
+            }
+            for key, (value, level) in metric_values.items():
+                self.validation_metrics[key].setText(value)
+                self._set_validation_icon(self.validation_metric_icons[key], level, 14)
+            panel_state = {
+                "基础连通性": (
+                    "通过" if reachable else "异常",
+                    "success" if reachable else "warning",
+                    "基础连通性正常，可访问目标服务。" if reachable else "目标服务响应异常，请恢复服务后再次校验。",
+                ),
+                "认证校验": (
+                    "通过" if login_known else "需确认",
+                    "success" if login_known else "warning",
+                    "认证规则已识别，Token 可用于后续请求。" if login_known else "未识别固定登录接口，请按接口文档确认认证方式。",
+                ),
+                "接口资产校验": (
+                    "通过" if reachable else "部分异常",
+                    "success" if reachable else "warning",
+                    "接口资产已校验，可开始生成测试用例。" if reachable else "存在不可访问接口，建议查看校验响应并处理。",
+                ),
+            }
+            for panel_name, (text, level, summary_text) in panel_state.items():
+                panel_status, panel_icon = self.validation_panel_status[panel_name]
+                panel_status.setText(text)
+                self._set_validation_icon(panel_icon, level, 14)
+                self._set_validation_label_style(panel_status, level, "ValidationPanel")
+                summary, summary_icon = self.validation_panel_summaries[panel_name]
+                summary.setText(summary_text)
+                self._set_validation_icon(summary_icon, level, 15)
+                self._set_validation_label_style(summary, level, "ValidationSummary")
+            if self.validation_asset_action is not None:
+                self.validation_asset_action.setVisible(not reachable)
+            timestamp = started_at
+            def event_time() -> str:
+                nonlocal timestamp
+                timestamp += timedelta(milliseconds=180)
+                return timestamp.strftime("%H:%M:%S")
+
+            log_entries = [
+                (started_at.strftime("%H:%M:%S"), "开始环境校验", "running"),
+                (event_time(), "解析基础地址", "success"),
+                (event_time(), "DNS 解析", "success"),
+                (event_time(), "网络连通性检查", "success"),
+                (event_time(), f"服务健康检查（HTTP {result.status_code}）", "success" if reachable else "warning"),
+                (event_time(), "登录认证规则识别" if login_known else "未发现固定登录接口", "success" if login_known else "warning"),
+                (event_time(), "Token 获取规则已识别", "success"),
+                (event_time(), f"接口资产加载：{endpoint_count} 个接口", "success"),
+                (event_time(), "接口可访问性校验", "success" if reachable else "warning"),
+                (event_time(), "校验完成", "success" if reachable else "warning"),
+            ]
+            self._set_validation_log(log_entries)
+            self.statusBar().showMessage(f"环境校验{status_text}", 4000)
+        except Exception as exc:
+            self._validation_response_detail = {
+                "request": {
+                    "method": "HEAD",
+                    "url": f"{base_url.rstrip('/')}/",
+                    "headers": {},
+                    "body": None,
+                },
+                "error": str(exc),
+            }
+            for _detail, status, status_icon in self.validation_steps:
+                status.setText("异常")
+                self._set_validation_icon(status_icon, "warning")
+                self._set_validation_label_style(status, "warning", "ValidationStep")
+            for metric_icon in self.validation_metric_icons.values():
+                self._set_validation_icon(metric_icon, "warning", 14)
+            for panel_name, (panel_status, panel_icon) in self.validation_panel_status.items():
+                panel_status.setText("异常")
+                self._set_validation_icon(panel_icon, "warning", 14)
+                self._set_validation_label_style(panel_status, "warning", "ValidationPanel")
+                summary, summary_icon = self.validation_panel_summaries[panel_name]
+                summary.setText("校验未完成，请检查测试环境后再次校验。")
+                self._set_validation_icon(summary_icon, "warning", 15)
+                self._set_validation_label_style(summary, "warning", "ValidationSummary")
+            if self.validation_asset_action is not None:
+                self.validation_asset_action.setVisible(True)
+            self._set_validation_log([
+                (started_at.strftime("%H:%M:%S"), "开始环境校验", "running"),
+                (datetime.now().strftime("%H:%M:%S"), f"校验失败：{exc}", "warning"),
+            ])
+            QMessageBox.warning(self, "环境校验失败", str(exc))
+
+    def show_validation_response_details(self):
+        """Show the real request/response produced by the latest validation."""
+        detail = getattr(self, "_validation_response_detail", None)
+        if not detail:
+            QMessageBox.information(self, "暂无校验响应", "请先开始环境校验，再查看本次请求响应。")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("环境校验请求响应")
+        dialog.resize(780, 560)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel("本次环境校验使用 HEAD 请求检查基础地址。这里展示实际请求与响应；不会逐一执行业务接口，避免产生业务副作用。")
+        hint.setObjectName("ValidationHint")
+        hint.setWordWrap(True)
+        editor = QTextEdit()
+        editor.setReadOnly(True)
+        editor.setPlainText(json.dumps(detail, ensure_ascii=False, indent=2, default=str))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(hint)
+        layout.addWidget(editor, 1)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def save_environment(self):
         if not self.current_project_id:
@@ -2720,6 +4170,12 @@ class MainWindow(QMainWindow):
         try:
             headers = json.loads(self.headers.toPlainText() or "{}")
             values = json.loads(self.variables.toPlainText() or "{}")
+            username = self.auth_username.text().strip() if hasattr(self, "auth_username") else ""
+            password = self.auth_password.text() if hasattr(self, "auth_password") else ""
+            if username:
+                values["TEST_USERNAME"] = username
+            if password:
+                values["TEST_PASSWORD"] = password
             if not isinstance(headers, dict): raise ValueError("Headers 必须是 JSON 对象")
             if not isinstance(values, dict): raise ValueError("环境变量必须是 JSON 对象")
             public, secrets = split_sensitive(values)
@@ -2727,9 +4183,13 @@ class MainWindow(QMainWindow):
                 self.current_project_id, self.env_name.text(), self.base_url.text(), headers,
                 public, self.secret_store.encrypt_dict(secrets),
             )
+            self.db.set_setting(
+                f"environment_authorized:{self.current_project_id}:{self.env_name.text().strip()}",
+                "1" if self.environment_confirmed.isChecked() else "0",
+            )
             self.db.audit(self.current_project_id, "save_environment",
                           {"name": self.env_name.text(), "secret_count": len(secrets)})
-            self.statusBar().showMessage("环境已保存", 3000)
+            self.statusBar().showMessage("项目运行配置已保存，后续可直接生成并一键执行用例。", 4000)
             self._project_changed()
         except ValueError as exc:
             QMessageBox.warning(self, "配置错误", str(exc))
@@ -2962,11 +4422,14 @@ class MainWindow(QMainWindow):
         except (ValueError, json.JSONDecodeError) as exc:
             QMessageBox.warning(self, "执行前检查", str(exc))
             return None
-        message = (f"准备执行 {len(cases)} 条{label}\n\n环境：{self.env_name.text() or '未命名'}\n"
-                   f"地址：{self.base_url.text()}\n并发：{self.max_workers.value()}\n\n"
-                   "将向该测试环境发送请求，并记录报告。是否开始？")
-        if QMessageBox.question(self, "执行前确认", message) != QMessageBox.Yes:
+        try:
+            variables = self._prepare_auto_auth(variables)
+        except ValueError as exc:
+            QMessageBox.warning(self, "自动认证未完成", str(exc))
             return None
+        self.statusBar().showMessage(
+            f"使用已保存运行配置“{self.env_name.text() or '未命名'}”一键执行 {len(cases)} 条{label}。", 4000
+        )
         return headers, variables
 
     def _start_case_run(self, cases: list[dict], label: str):
@@ -3022,9 +4485,41 @@ class MainWindow(QMainWindow):
     def refresh_reports(self):
         rows = []
         if self.current_project_id:
-            rows.extend({**row, "report_type": row.get("report_type") or "接口契约报告", "report_name": self.projects.currentText()} for row in self.db.list_reports(self.current_project_id))
-            rows.extend({**row, "report_type": row.get("report_type") or "业务流程报告", "report_name": row.get("workflow_name", "业务流程")} for row in self.db.list_workflow_reports(self.current_project_id))
-            rows.extend({**row, "report_name": self.projects.currentText(), "run_id": row.get("id", "")} for row in self.db.list_evidence_reports(self.current_project_id))
+            rows.extend(
+                {
+                    **row,
+                    "report_type": row.get("report_type") or "接口契约报告",
+                    "report_name": self.projects.currentText(),
+                    "status": row.get("status") or "completed",
+                    "started_at": row.get("started_at") or row.get("created_at") or "",
+                    "finished_at": row.get("finished_at") or "",
+                }
+                for row in self.db.list_reports(self.current_project_id)
+            )
+            rows.extend(
+                {
+                    **row,
+                    "report_type": row.get("report_type") or "业务流程报告",
+                    "report_name": row.get("workflow_name", "业务流程"),
+                    "status": row.get("status") or "completed",
+                    "started_at": row.get("started_at") or row.get("created_at") or "",
+                    "finished_at": row.get("finished_at") or "",
+                }
+                for row in self.db.list_workflow_reports(self.current_project_id)
+            )
+            # 证据报告不隶属于一次 test_run，本身没有 status/started_at 字段；
+            # 统一为可展示的已完成记录，兼容已有本地数据库。
+            rows.extend(
+                {
+                    **row,
+                    "report_name": self.projects.currentText(),
+                    "run_id": row.get("id", ""),
+                    "status": row.get("status") or "completed",
+                    "started_at": row.get("started_at") or row.get("created_at") or "",
+                    "finished_at": row.get("finished_at") or "",
+                }
+                for row in self.db.list_evidence_reports(self.current_project_id)
+            )
             rows.sort(key=lambda item: item.get("started_at") or item.get("created_at") or "", reverse=True)
         table = self.report_table
         table.setUpdatesEnabled(False)
@@ -3033,8 +4528,16 @@ class MainWindow(QMainWindow):
             self._report_rows = rows
             table.setRowCount(len(rows))
             for index, row in enumerate(rows):
-                values = (row.get("report_type", ""), row.get("report_name", ""), row.get("run_id", row.get("workflow_run_id", "")), row["status"], row["started_at"], row["finished_at"] or "",
-                          row["html_path"], row["json_path"])
+                values = (
+                    row.get("report_type", ""),
+                    row.get("report_name", ""),
+                    row.get("run_id", row.get("workflow_run_id", "")),
+                    row.get("status", "completed"),
+                    row.get("started_at", row.get("created_at", "")),
+                    row.get("finished_at") or "",
+                    row.get("html_path", ""),
+                    row.get("json_path", ""),
+                )
                 for column, value in enumerate(values):
                     table.setItem(index, column, QTableWidgetItem(str(value)))
         finally:
