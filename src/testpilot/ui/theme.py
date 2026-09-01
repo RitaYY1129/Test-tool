@@ -422,6 +422,44 @@ QFrame#Card, QFrame#ProjectPanel, QGroupBox {
     border: 1px solid #e2e8f0;
     border-radius: 4px;
 }
+QFrame#RunnerQuickCard {
+    background: #ffffff;
+    border: 1px solid #cfe1f8;
+    border-left: 3px solid #1677e8;
+    border-radius: 7px;
+}
+QFrame#RunnerConfigCard, QFrame#RunnerManualCard, QFrame#RunnerDetailCard {
+    background: #ffffff;
+    border: 1px solid #e0e8f1;
+    border-radius: 7px;
+}
+QFrame#RunnerManualCard { background: #f8fbff; }
+QTableWidget#RunnerRunTable {
+    background: #ffffff;
+    border: 1px solid #e0e8f1;
+    border-radius: 7px;
+    gridline-color: #edf2f7;
+    alternate-background-color: #f8fbff;
+}
+QTableWidget#RunnerRunTable::item { padding: 8px 7px; color: #35506d; }
+QTableWidget#RunnerRunTable::item:selected { background: #eaf3ff; color: #135eae; }
+QTextEdit#RunnerRunDetail {
+    background: #fbfdff;
+    border: 1px solid #e6edf5;
+    border-radius: 5px;
+    color: #40566d;
+    font-family: Consolas, "Microsoft YaHei UI";
+    font-size: 12px;
+    padding: 8px;
+}
+QToolButton {
+    color: #28618f;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-weight: 600;
+}
+QToolButton:hover { background: #f0f7ff; border-color: #cfe1f8; }
 QGroupBox {
     margin-top: 10px;
     padding: 16px 12px 12px 12px;
@@ -546,6 +584,20 @@ QComboBox::drop-down {
     border: none;
     width: 26px;
 }
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #d8e3ef;
+    border-radius: 5px;
+    outline: none;
+    padding: 4px;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 28px;
+    padding: 2px 9px;
+    border-radius: 4px;
+}
+QComboBox QAbstractItemView::item:hover { background: #f5f8fc; }
+QComboBox QAbstractItemView::item:selected { background: #eaf3ff; }
 QTableWidget {
     background: white;
     alternate-background-color: #fafbfd;
@@ -688,6 +740,338 @@ QFrame#RecognitionCard, QFrame#WorkflowExecutionCard {
     background: #ffffff;
     border: 1px solid #dfe8f3;
     border-radius: 8px;
+}
+QFrame#RuntimeSetupCard {
+    background: #ffffff;
+    border: 1px solid #dfe8f3;
+    border-radius: 8px;
+}
+QFrame#RuntimeHelpCard {
+    background: #f2f8ff;
+    border: 1px solid #d3e6ff;
+    border-radius: 6px;
+    min-height: 126px;
+}
+QLabel#RuntimeHelpTitle { color: #1677e8; font-size: 14px; font-weight: 700; }
+QLabel#RuntimeHelpText { color: #54708d; font-size: 12px; line-height: 1.55; }
+QSplitter#EndpointWorkspace::handle { background: #dfe8f3; width: 1px; }
+QSplitter#EndpointWorkbench::handle { background: #f1f5f9; width: 8px; }
+QFrame#EndpointRequestCard, QFrame#EndpointDefinitionCard {
+    background: #ffffff;
+    border: 1px solid #dfe8f2;
+    border-radius: 7px;
+}
+QFrame#EndpointGroupCard { background: #ffffff; border: none; }
+QLabel#EndpointPaneTitle { color: #1f3957; font-size: 13px; font-weight: 700; }
+QLineEdit#EndpointSearch {
+    background: #ffffff;
+    border: 1px solid #dce6f1;
+    border-radius: 5px;
+    min-height: 28px;
+    padding-left: 9px;
+}
+QPushButton#EndpointNewGroup {
+    background: #ffffff;
+    border: 1px solid #dce7f3;
+    border-radius: 4px;
+    color: #1677e8;
+    min-height: 27px;
+}
+QPushButton#EndpointNewGroup:hover { background: #f0f7ff; border-color: #9ec8fb; }
+QComboBox#EndpointMethod {
+    background: #ffffff;
+    border: 1px solid #dce6f1;
+    border-right: none;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    font-weight: 700;
+    min-width: 84px;
+    min-height: 36px;
+    max-height: 36px;
+}
+QComboBox#EndpointMethod::drop-down {
+    width: 20px;
+    border-left: 1px solid #e3ebf4;
+}
+QComboBox#EndpointMethod QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #cfdceb;
+    outline: none;
+    selection-background-color: #eef6ff;
+}
+QComboBox#EndpointEnvironment {
+    background: #ffffff;
+    border: 1px solid #dce6f1;
+    border-radius: 4px;
+    color: #36526d;
+    min-height: 27px;
+    padding: 0 7px;
+}
+QLineEdit#EndpointUrl {
+    background: #ffffff;
+    border: 1px solid #dce6f1;
+    border-left: 1px solid #dce6f1;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-top-right-radius: 5px;
+    border-bottom-right-radius: 5px;
+    min-height: 36px;
+    max-height: 36px;
+    color: #41607f;
+}
+QPushButton#EndpointSend {
+    border-radius: 5px;
+    min-width: 54px;
+    max-width: 54px;
+    min-height: 36px;
+    max-height: 36px;
+    padding: 0;
+    border: 1px solid #1677e8;
+}
+QPushButton#EndpointToolbarButton {
+    background: #ffffff;
+    border: 1px solid #dce6f1;
+    border-radius: 5px;
+    color: #36526d;
+    min-width: 56px;
+    font-size: 13px;
+}
+QPushButton#EndpointToolbarButton:hover { background: #f6faff; border-color: #9ec8fb; color: #1677e8; }
+QLabel#EndpointActiveTab {
+    background: #f0f7ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 4px;
+    color: #243b53;
+    font-weight: 700;
+    min-height: 25px;
+    padding: 3px 9px;
+}
+QTabWidget#EndpointRequestTabs::pane {
+    background: #ffffff;
+    border: 1px solid #e4edf6;
+    border-radius: 5px;
+    top: -1px;
+}
+QTabWidget#EndpointRequestTabs::tab-bar { alignment: left; }
+QTabWidget#EndpointRequestTabs QTabBar::tab {
+    background: transparent;
+    border: none;
+    color: #7086a0;
+    min-width: 48px;
+    padding: 7px 8px;
+}
+QTabWidget#EndpointRequestTabs QTabBar::tab:selected {
+    color: #1677e8;
+    border-bottom: 2px solid #1677e8;
+    font-weight: 700;
+}
+QTabWidget#EndpointBodyTabs::pane, QTabWidget#EndpointResponseTabs::pane,
+QTabWidget#EndpointDefinitionTabs::pane {
+    background: #ffffff;
+    border: 1px solid #e5edf6;
+    border-radius: 4px;
+    top: -1px;
+}
+QTabWidget#EndpointBodyTabs QTabBar::tab, QTabWidget#EndpointResponseTabs QTabBar::tab,
+QTabWidget#EndpointDefinitionTabs QTabBar::tab {
+    background: transparent;
+    border: none;
+    color: #6f8297;
+    padding: 6px 8px;
+}
+QTabWidget#EndpointBodyTabs QTabBar::tab:selected, QTabWidget#EndpointResponseTabs QTabBar::tab:selected,
+QTabWidget#EndpointDefinitionTabs QTabBar::tab:selected {
+    color: #1677e8;
+    border-bottom: 2px solid #1677e8;
+    font-weight: 700;
+}
+QLabel#EndpointEmptyHint { color: #7990a8; padding: 12px; }
+QLabel#EndpointFormTitle { color: #36526d; font-size: 12px; font-weight: 700; padding: 4px 0; }
+QWidget#QueryParameterEditor {
+    background: #ffffff;
+    border: 1px solid #edf1f6;
+    border-radius: 5px;
+    padding: 5px;
+}
+QLabel#QueryParameterHeader { color: #697f96; font-size: 11px; font-weight: 700; }
+QWidget#QueryParameterRow { background: transparent; }
+QLineEdit#QueryParameterName, QLineEdit#QueryParameterValue {
+    background: #fbfdff;
+    border: 1px solid #e2eaf3;
+    border-radius: 5px;
+    color: #304b67;
+    min-height: 27px;
+    padding: 1px 8px;
+}
+QLineEdit#QueryParameterName:focus, QLineEdit#QueryParameterValue:focus {
+    background: #ffffff;
+    border-color: #8bbefa;
+}
+QToolButton#QueryParameterDelete {
+    background: transparent;
+    border: none;
+    color: #a6b4c2;
+    min-width: 22px;
+    min-height: 26px;
+    font-size: 16px;
+}
+QToolButton#QueryParameterDelete:hover { color: #ef4444; background: #fff3f3; border-radius: 4px; }
+QWidget#KeyValueParameterEditor {
+    background: #ffffff;
+    border: 1px solid #edf1f6;
+    border-radius: 5px;
+    padding: 7px;
+}
+QLabel#KeyValueParameterHeader {
+    color: #697f96;
+    font-size: 11px;
+    font-weight: 700;
+    padding-bottom: 1px;
+}
+QWidget#KeyValueParameterRow { background: transparent; }
+QLineEdit#KeyValueParameterName, QLineEdit#KeyValueParameterValue,
+QLineEdit#KeyValueParameterType, QLineEdit#KeyValueParameterDescription {
+    background: #fbfdff;
+    border: 1px solid #e2eaf3;
+    border-radius: 5px;
+    color: #304b67;
+    min-height: 30px;
+    padding: 1px 8px;
+}
+QLineEdit#KeyValueParameterName:focus, QLineEdit#KeyValueParameterValue:focus {
+    background: #ffffff;
+    border-color: #8bbefa;
+}
+QCheckBox#KeyValueParameterEnabled { min-width: 18px; max-width: 18px; }
+QLabel#KeyValueParameterSource {
+    background: #eef6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 4px;
+    color: #1677e8;
+    font-size: 10px;
+    padding: 2px 5px;
+}
+QToolButton#KeyValueParameterDelete {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    min-width: 32px;
+    min-height: 32px;
+    font-size: 17px;
+}
+QToolButton#KeyValueParameterDelete:hover { color: #ef4444; background: #fff3f3; border-radius: 4px; }
+QTableWidget#EndpointInputTable {
+    background: #ffffff;
+    border: none;
+    border-top: 1px solid #edf1f6;
+    gridline-color: #edf1f6;
+    color: #405c79;
+    font-size: 12px;
+}
+QTableWidget#EndpointInputTable::item { padding: 5px 8px; }
+QFrame#EndpointAuthHelp, QFrame#EndpointActionPage {
+    background: #f8fafc;
+    border: 1px solid #edf1f6;
+    border-radius: 7px;
+    color: #4c627d;
+}
+QFrame#EndpointOperationCard {
+    background: #f7fbff;
+    border: 1px solid #cfe4fb;
+    border-radius: 5px;
+}
+QLabel#EndpointOperationName { color: #2465a5; font-weight: 700; }
+QLabel#EndpointOperationDetail { color: #8091a5; font-size: 11px; }
+QLabel#EndpointAddAction, QPushButton#EndpointAddAction {
+    background: #ffffff;
+    border: 1px dashed #c9d8e9;
+    border-radius: 7px;
+    color: #8b5cf6;
+    font-weight: 700;
+    padding: 9px;
+    text-align: center;
+}
+QMenu#EndpointOperationMenu {
+    background: #ffffff;
+    border: 1px solid #dfe8f2;
+    border-radius: 7px;
+    padding: 5px;
+}
+QMenu#EndpointOperationMenu::item { padding: 7px 12px; border-radius: 4px; color: #36526d; }
+QMenu#EndpointOperationMenu::item:selected { background: #f0f7ff; color: #1677e8; }
+QFrame#EndpointResponsePanel { background: #ffffff; border: 1px solid #e2ebf5; border-radius: 5px; }
+QFrame#EndpointActionBar { background: #f8fbfe; border: 1px solid #e5edf5; border-radius: 5px; }
+QPushButton#EndpointActionButton { background: #ffffff; border: 1px solid #dce6f1; border-radius: 4px; color: #36526d; padding: 0 10px; }
+QLabel#EndpointResponseMeta { color: #72859a; font-size: 11px; }
+QLabel#EndpointDefinitionSection { color: #36526d; font-size: 12px; font-weight: 700; padding-top: 2px; }
+QTableWidget#EndpointDefinitionTable {
+    background: #ffffff;
+    border: 1px solid #e2ebf5;
+    border-radius: 4px;
+    gridline-color: #edf2f7;
+    color: #45617e;
+    font-size: 11px;
+    min-height: 54px;
+}
+QTableWidget#EndpointDefinitionTable::item { padding: 4px 5px; }
+QTextEdit#EndpointEditor {
+    background: #fbfdff;
+    border: 1px solid #e1eaf3;
+    border-radius: 4px;
+    color: #2f4965;
+    font-family: Consolas, "Microsoft YaHei UI";
+    font-size: 12px;
+    min-height: 112px;
+    padding: 7px;
+}
+QRadioButton#EndpointBodyType { color: #46627e; spacing: 4px; min-height: 25px; }
+QPushButton#EndpointBodyFormat {
+    background: #ffffff;
+    border: 1px solid #dce7f3;
+    border-radius: 4px;
+    color: #1677e8;
+    min-height: 26px;
+    padding: 1px 8px;
+}
+QPushButton#EndpointBodyFormat:hover { background: #f0f7ff; border-color: #9ec8fb; }
+QTextEdit#EndpointBodyEditor {
+    background: #fbfdff;
+    border: 1px solid #e1eaf3;
+    border-radius: 5px;
+    color: #2f4965;
+    font-family: Consolas, "Microsoft YaHei UI";
+    font-size: 12px;
+    min-height: 150px;
+    padding: 7px;
+}
+QTextEdit#EndpointBodyEditor:disabled { color: #9aabba; background: #f8fafc; }
+QLabel#EndpointResponseTitle { color: #1f3957; font-weight: 700; padding: 2px 0; }
+QTreeWidget#EndpointNavigator, QTableWidget#EndpointList {
+    background: #ffffff;
+    border: 1px solid #e0e8f1;
+    border-radius: 7px;
+    color: #344b63;
+}
+QTreeWidget#EndpointNavigator::item { min-height: 30px; padding: 1px 8px; }
+QTreeWidget#EndpointNavigator::item:selected { background: #eef6ff; color: #243b53; font-weight: 400; }
+QWidget#EndpointTreeLeaf { background: transparent; }
+QLabel#EndpointTreeMethod { font-size: 12px; font-weight: 600; background: transparent; }
+QLabel#EndpointTreeName { color: #243b53; font-size: 13px; background: transparent; }
+QTableWidget#EndpointList::item { padding: 7px 8px; }
+QTableWidget#EndpointList::item:selected { background: #eef6ff; color: #135eae; }
+QFrame#EndpointDetailCard {
+    background: #ffffff;
+    border: 1px solid #e0e8f1;
+    border-radius: 7px;
+}
+QTextEdit#EndpointDetail {
+    background: #fbfdff;
+    border: 1px solid #e6edf5;
+    border-radius: 5px;
+    color: #40566d;
+    font-family: Consolas, "Microsoft YaHei UI";
+    font-size: 12px;
+    padding: 8px;
 }
 QLabel#ValidationProjectName, QLabel#ValidationHint {
     color: #607996;

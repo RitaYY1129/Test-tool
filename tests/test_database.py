@@ -60,8 +60,8 @@ def test_route_a_schema_and_source_analysis_are_persisted(tmp_path):
     assert db.list_analysis_edges(run_id)[0]["target_symbol"] == "UserService"
     assert db.list_analysis_evidence(run_id)[0]["evidence_type"] == "endpoint_route"
     with db.connect() as connection:
-            assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 10
+            assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 11
     # Re-opening the same legacy-compatible database must not duplicate the migration.
     Database(tmp_path / "test.db")
     with db.connect() as connection:
-            assert connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 10
+            assert connection.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 11

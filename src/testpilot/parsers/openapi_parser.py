@@ -64,8 +64,8 @@ class OpenApiParser:
                 if method.lower() not in HTTP_METHODS or not isinstance(operation, dict):
                     continue
                 raw_params = [*common_params, *(operation.get("parameters") or [])]
-                parameters, swagger_body = self._parameters(raw_params)
-                request_body = operation.get("requestBody") or swagger_body
+                parameters, swagger_body = self._parameters(raw_params, data)
+                request_body = self._resolve_local_references(operation.get("requestBody") or swagger_body, data)
                 tags = operation.get("tags") or ["未分组"]
                 endpoints.append(
                     ApiEndpoint(
@@ -97,18 +97,19 @@ class OpenApiParser:
             security_schemes=security_schemes,
         )
 
-    @staticmethod
-    def _parameters(items: list[Any]) -> tuple[list[ApiParameter], dict[str, Any]]:
+    @classmethod
+    def _parameters(cls, items: list[Any], document: dict[str, Any]) -> tuple[list[ApiParameter], dict[str, Any]]:
         result: list[ApiParameter] = []
         body: dict[str, Any] = {}
         for item in items:
-            if not isinstance(item, dict) or "$ref" in item:
+            item = cls._resolve_local_references(item, document)
+            if not isinstance(item, dict):
                 continue
             location = str(item.get("in") or "")
             if location == "body":
                 body = {
                     "required": bool(item.get("required")),
-                    "content": {"application/json": {"schema": item.get("schema") or {}}},
+                    "content": {"application/json": {"schema": cls._resolve_local_references(item.get("schema") or {}, document)}},
                 }
                 continue
             schema = item.get("schema") or {
@@ -121,12 +122,32 @@ class OpenApiParser:
                     name=str(item.get("name") or ""),
                     location=location,
                     required=bool(item.get("required")) or location == "path",
-                    schema=schema,
+                    schema=cls._resolve_local_references(schema, document),
                     description=str(item.get("description") or ""),
                     example=item.get("example"),
                 )
             )
         return result, body
+
+    @classmethod
+    def _resolve_local_references(cls, value: Any, document: dict[str, Any], seen: frozenset[str] = frozenset()) -> Any:
+        """Inline local OpenAPI refs so the debugger can render request fields."""
+        if isinstance(value, list):
+            return [cls._resolve_local_references(item, document, seen) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/") and reference not in seen:
+            target: Any = document
+            for part in reference[2:].split("/"):
+                if not isinstance(target, dict):
+                    target = None
+                    break
+                target = target.get(part.replace("~1", "/").replace("~0", "~"))
+            if isinstance(target, dict):
+                overrides = {key: item for key, item in value.items() if key != "$ref"}
+                return cls._resolve_local_references({**target, **overrides}, document, seen | {reference})
+        return {key: cls._resolve_local_references(item, document, seen) for key, item in value.items()}
 
     @staticmethod
     def _base_urls(data: dict[str, Any], is_swagger: bool) -> list[str]:

@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
-from PySide6.QtCore import QByteArray, Qt, QProcess, QSize, QObject, QRunnable, QThreadPool, Signal, Slot, QUrl, QTimer
-from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap, QKeySequence, QShortcut, QPen
+from PySide6.QtCore import QByteArray, Qt, QProcess, QProcessEnvironment, QSize, QPoint, QObject, QRunnable, QThreadPool, Signal, Slot, QUrl, QTimer
+from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap, QKeySequence, QShortcut, QPen, QColor, QPalette, QBrush
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
-    QDialog, QDialogButtonBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QApplication, QAbstractItemView, QDialog, QDialogButtonBox, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
-    QProgressBar, QScrollArea, QSpinBox, QStackedWidget, QStyle, QTabWidget, QTableWidget, QTableWidgetItem,
-    QTextEdit, QToolButton, QVBoxLayout, QWidget, QStyleOptionButton, QSizePolicy,
+    QProgressBar, QScrollArea, QSpinBox, QStackedWidget, QStyle, QTabWidget, QTableWidget, QTableWidgetItem, QMenu,
+    QTextEdit, QToolButton, QVBoxLayout, QWidget, QStyleOptionButton, QStyleOptionViewItem, QStyledItemDelegate, QSizePolicy, QRadioButton,
 )
 
 from testpilot.engines.http_engine import execute_request
@@ -29,6 +31,8 @@ from testpilot.engines.ai_dialogue import ControlledDialogue
 from testpilot.engines.database_observer import inspect_sqlite_database
 from testpilot.engines.database_adapters import create_database_adapter
 from testpilot.engines.runtime_trace import TraceCollector
+from testpilot.engines.external_runner import complete_external_run, queue_external_run, validate_local_runner_artifacts
+from testpilot.contracts.runner import ContractError
 from testpilot.reports.difference import build_combined_difference, generate_difference_report
 from testpilot.engines.replay_package import export_replay_package
 from testpilot.domain.flow import build_flow_model, validate_flow_model
@@ -71,9 +75,256 @@ class BlueCheckBox(QCheckBox):
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
-        painter.drawLine(indicator.left() + 4, indicator.center().y(), indicator.left() + 7, indicator.bottom() - 4)
-        painter.drawLine(indicator.left() + 7, indicator.bottom() - 4, indicator.right() - 3, indicator.top() + 4)
+        # Some Windows Qt styles paint a solid blue indicator over thin lines.
+        # A bold glyph keeps the checked state unmistakable in every page.
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(max(12, indicator.height() - 4))
+        painter.setFont(font)
+        painter.drawText(indicator, Qt.AlignCenter, "✓")
         painter.end()
+
+
+class HttpMethodItemDelegate(QStyledItemDelegate):
+    """Keeps every HTTP method option coloured even when the combo has a style sheet."""
+
+    COLORS = {
+        "GET": "#00a854", "POST": "#f0441f", "PUT": "#1677ff", "PATCH": "#8b5cf6",
+        "DELETE": "#ef4444", "HEAD": "#06b6c9", "OPTIONS": "#d69e00",
+    }
+
+    def paint(self, painter, option, index):  # noqa: N802 - Qt callback name
+        styled = QStyleOptionViewItem(option)
+        method = str(index.data(Qt.DisplayRole) or "").upper()
+        styled.palette.setColor(QPalette.Text, QColor(self.COLORS.get(method, "#1677e8")))
+        # Selected state is expressed by the row background, never by replacing
+        # the method's semantic colour.
+        styled.palette.setColor(QPalette.HighlightedText, QColor(self.COLORS.get(method, "#1677e8")))
+        super().paint(painter, styled, index)
+
+
+class BelowPopupComboBox(QComboBox):
+    """Qt combo whose popup is anchored below its input instead of over it."""
+
+    def showPopup(self) -> None:  # noqa: N802 - Qt callback name
+        super().showPopup()
+        popup = self.view().window()
+        if popup is None:
+            return
+        popup.setMinimumWidth(max(popup.minimumWidth(), self.width()))
+        anchor = self.mapToGlobal(QPoint(0, self.height()))
+        screen = self.screen()
+        available = screen.availableGeometry() if screen else None
+        popup_height = popup.height() or popup.sizeHint().height()
+        if available and anchor.y() + popup_height > available.bottom():
+            anchor.setY(self.mapToGlobal(QPoint(0, 0)).y() - popup_height)
+        popup.move(anchor)
+
+
+class EndpointTreeDelegate(QStyledItemDelegate):
+    """Render only the HTTP method in colour; endpoint names stay black."""
+
+    COLORS = HttpMethodItemDelegate.COLORS
+
+    def paint(self, painter, option, index):  # noqa: N802 - Qt callback name
+        text = str(index.data(Qt.DisplayRole) or "")
+        method, separator, remainder = text.partition("  ")
+        if method not in self.COLORS or not separator:
+            super().paint(painter, option, index)
+            return
+        styled = QStyleOptionViewItem(option); styled.text = ""
+        super().paint(painter, styled, index)
+        rect = option.rect.adjusted(8, 0, -5, 0)
+        painter.save()
+        painter.setPen(QColor(self.COLORS[method]))
+        painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, method)
+        # Keep a stable 12 px gap between the coloured method and the black name.
+        method_width = painter.fontMetrics().horizontalAdvance(method) + 12
+        painter.setPen(QColor("#243b53"))
+        painter.drawText(rect.adjusted(method_width, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, remainder)
+        painter.restore()
+
+
+class QueryParameterEditor(QWidget):
+    """Compact Apifox-style Query key/value editor with one trailing empty row."""
+
+    parametersChanged = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("QueryParameterEditor")
+        self._rows: list[tuple[QWidget, QLineEdit, QLineEdit]] = []
+        self._updating = False
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(3)
+        header = QHBoxLayout(); header.setContentsMargins(4, 0, 28, 0)
+        header.addWidget(QLabel("Parameter Name", objectName="QueryParameterHeader"), 1)
+        header.addWidget(QLabel("Parameter Value", objectName="QueryParameterHeader"), 1)
+        layout.addLayout(header)
+        self.rows_layout = QVBoxLayout(); self.rows_layout.setContentsMargins(0, 0, 0, 0); self.rows_layout.setSpacing(3)
+        layout.addLayout(self.rows_layout)
+        self.set_parameters([])
+
+    def set_parameters(self, parameters: list[dict]) -> None:
+        self._updating = True
+        while self._rows:
+            row, _, _ = self._rows.pop()
+            row.deleteLater()
+        for parameter in parameters:
+            self._add_row(str(parameter.get("name") or ""), str(parameter.get("value") or ""))
+        self._add_row()
+        self._updating = False
+
+    def parameters(self) -> list[tuple[str, str]]:
+        return [
+            (name.text().strip(), value.text().strip())
+            for _, name, value in self._rows
+            if name.text().strip()
+        ]
+
+    def _add_row(self, name_value: str = "", parameter_value: str = "") -> None:
+        row = QWidget(); row.setObjectName("QueryParameterRow")
+        layout = QHBoxLayout(row); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(6)
+        name = QLineEdit(name_value); name.setObjectName("QueryParameterName"); name.setPlaceholderText("Add parameter")
+        value = QLineEdit(parameter_value); value.setObjectName("QueryParameterValue"); value.setPlaceholderText("Value")
+        remove = QToolButton(); remove.setText("×"); remove.setObjectName("QueryParameterDelete"); remove.setToolTip("Delete parameter")
+        layout.addWidget(name, 1); layout.addWidget(value, 1); layout.addWidget(remove)
+        self.rows_layout.addWidget(row); self._rows.append((row, name, value))
+        name.textChanged.connect(self._row_changed); value.textChanged.connect(self._row_changed)
+        remove.clicked.connect(lambda: self._remove_row(row))
+
+    def _row_changed(self, _value: str) -> None:
+        if self._updating:
+            return
+        if self._rows:
+            _, name, value = self._rows[-1]
+            if name.text().strip() or value.text().strip():
+                self._add_row()
+        self.parametersChanged.emit()
+
+    def _remove_row(self, row: QWidget) -> None:
+        for index, (candidate, _, _) in enumerate(self._rows):
+            if candidate is row:
+                self._rows.pop(index)
+                row.setParent(None); row.deleteLater()
+                break
+        if not self._rows:
+            self._add_row()
+        self.parametersChanged.emit()
+
+
+class KeyValueParameterEditor(QWidget):
+    """Shared compact editor for Query, Headers and Cookies."""
+
+    parametersChanged = Signal()
+
+    def __init__(self, name_label: str, value_label: str, name_placeholder: str, value_placeholder: str,
+                 supports_enabled: bool = False, shows_metadata: bool = False, parent=None):
+        super().__init__(parent)
+        self.setObjectName("KeyValueParameterEditor")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.supports_enabled = supports_enabled
+        self.shows_metadata = shows_metadata
+        self.name_placeholder, self.value_placeholder = name_placeholder, value_placeholder
+        self._rows: list[dict] = []
+        self._updating = False
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(6)
+        header = QHBoxLayout(); header.setContentsMargins(6, 2, 34, 0); header.setSpacing(8)
+        if supports_enabled:
+            header.addSpacing(22)
+        header.addWidget(QLabel(name_label, objectName="KeyValueParameterHeader"), 4)
+        header.addWidget(QLabel(value_label, objectName="KeyValueParameterHeader"), 4)
+        if shows_metadata:
+            header.addWidget(QLabel("类型", objectName="KeyValueParameterHeader"), 2)
+            header.addWidget(QLabel("说明", objectName="KeyValueParameterHeader"), 3)
+        layout.addLayout(header)
+        self.rows_layout = QVBoxLayout(); self.rows_layout.setContentsMargins(0, 0, 0, 0); self.rows_layout.setSpacing(6)
+        layout.addLayout(self.rows_layout)
+        self.set_parameters([])
+
+    def set_parameters(self, parameters: list[dict]) -> None:
+        self._updating = True
+        while self._rows:
+            self._rows.pop()["row"].deleteLater()
+        for parameter in parameters:
+            value = parameter.get("value", "")
+            self._add_row(
+                str(parameter.get("name") or ""), "" if value is None else str(value),
+                bool(parameter.get("enabled", True)), str(parameter.get("source") or ""),
+                str(parameter.get("type") or ""), str(parameter.get("description") or ""),
+            )
+        self._add_row()
+        self._updating = False
+
+    def entries(self) -> list[dict]:
+        result = []
+        for item in self._rows:
+            name, value = item["name"].text().strip(), item["value"].text().strip()
+            if name:
+                result.append({
+                    "name": name, "value": value,
+                    "enabled": item["enabled"].isChecked() if item["enabled"] else True,
+                    "source": item["source"],
+                    "type": item["type"].text().strip() if item.get("type") else "",
+                    "description": item["description"].text().strip() if item.get("description") else "",
+                })
+        return result
+
+    def parameters(self) -> list[tuple[str, str]]:
+        return [(item["name"], item["value"]) for item in self.entries() if item["enabled"]]
+
+    def _add_row(self, name_value: str = "", parameter_value: str = "", enabled: bool = True, source: str = "",
+                 parameter_type: str = "", description: str = "") -> None:
+        row = QWidget(); row.setObjectName("KeyValueParameterRow")
+        layout = QHBoxLayout(row); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(8)
+        toggle = None
+        if self.supports_enabled:
+            toggle = QCheckBox(); toggle.setChecked(enabled); toggle.setToolTip("启用此参数"); toggle.setObjectName("KeyValueParameterEnabled")
+            layout.addWidget(toggle)
+        name = QLineEdit(name_value); name.setObjectName("KeyValueParameterName"); name.setPlaceholderText(self.name_placeholder)
+        value = QLineEdit(parameter_value); value.setObjectName("KeyValueParameterValue"); value.setPlaceholderText(self.value_placeholder)
+        parameter_type_input = None
+        description_input = None
+        if self.shows_metadata:
+            parameter_type_input = QLineEdit(parameter_type); parameter_type_input.setObjectName("KeyValueParameterType"); parameter_type_input.setPlaceholderText("类型")
+            description_input = QLineEdit(description); description_input.setObjectName("KeyValueParameterDescription"); description_input.setPlaceholderText("说明（可选）")
+        source_label = QLabel(source); source_label.setObjectName("KeyValueParameterSource"); source_label.setVisible(bool(source))
+        remove = QToolButton(); remove.setText("×"); remove.setObjectName("KeyValueParameterDelete"); remove.setToolTip("删除参数")
+        layout.addWidget(name, 4); layout.addWidget(value, 4)
+        if parameter_type_input and description_input:
+            layout.addWidget(parameter_type_input, 2); layout.addWidget(description_input, 3)
+        layout.addWidget(source_label); layout.addWidget(remove)
+        item = {"row": row, "name": name, "value": value, "enabled": toggle, "source": source,
+                "type": parameter_type_input, "description": description_input}
+        self._rows.append(item); self.rows_layout.addWidget(row)
+        name.textChanged.connect(self._row_changed); value.textChanged.connect(self._row_changed)
+        if parameter_type_input:
+            parameter_type_input.textChanged.connect(lambda *_: self.parametersChanged.emit())
+        if description_input:
+            description_input.textChanged.connect(lambda *_: self.parametersChanged.emit())
+        if toggle:
+            def set_row_enabled(is_enabled: bool) -> None:
+                name.setEnabled(is_enabled); value.setEnabled(is_enabled)
+                self._row_changed()
+            name.setEnabled(enabled); value.setEnabled(enabled)
+            toggle.toggled.connect(set_row_enabled)
+        remove.clicked.connect(lambda: self._remove_row(row))
+
+    def _row_changed(self, *_args) -> None:
+        if self._updating:
+            return
+        if self._rows:
+            last = self._rows[-1]
+            if last["name"].text().strip() or last["value"].text().strip():
+                self._add_row()
+        self.parametersChanged.emit()
+
+    def _remove_row(self, row: QWidget) -> None:
+        for index, item in enumerate(self._rows):
+            if item["row"] is row:
+                self._rows.pop(index); row.setParent(None); row.deleteLater(); break
+        if not self._rows:
+            self._add_row()
+        self.parametersChanged.emit()
 
 
 WORKFLOW_GENERATION_SCHEMA = {
@@ -215,6 +466,9 @@ class MainWindow(QMainWindow):
         self._case_run_cases = []
         self._case_run_completed = 0
         self._last_failed_case_ids = []
+        self._external_runner_processes: dict[int, QProcess] = {}
+        self._external_runner_timeouts: dict[int, QTimer] = {}
+        self._external_runner_timed_out: set[int] = set()
         self.setWindowTitle("TestPilot AI · 第一阶段")
         self.resize(1280, 780)
         self._build()
@@ -264,22 +518,24 @@ class MainWindow(QMainWindow):
         self._menu_groups = []
         self._primary_headers = []
         self._route_headers = []
-        self._active_route = "路线 A · 源码驱动"
+        self._active_route = "路线 A：外部工程测试"
         self._sidebar_icon_cache = {}
         self._add_sidebar_entry("首页", 0, QStyle.SP_DirHomeIcon)
         self._add_nested_sidebar_group("接口测试", QStyle.SP_ComputerIcon, [
-            ("路线 A · 源码驱动", QStyle.SP_FileDialogContentsView, [
-                ("接口资产", 1, QStyle.SP_FileDialogDetailedView),
+            ("基础配置", QStyle.SP_FileDialogInfoView, [
+                ("项目管理", 0, QStyle.SP_DirIcon),
                 ("环境校验", 2, QStyle.SP_DriveNetIcon),
-                ("业务流程与测试执行", 7, QStyle.SP_FileDialogInfoView),
             ]),
-            ("路线 B · 资料驱动", QStyle.SP_FileDialogContentsView, [
-                ("接口资料与资产", 1, QStyle.SP_FileDialogDetailedView),
-                ("环境与请求", 2, QStyle.SP_DriveNetIcon),
+            ("路线 A：外部工程测试", QStyle.SP_FileDialogContentsView, [
+                ("外部 Runner", 9, QStyle.SP_MediaPlay),
+            ]),
+            ("路线 B：接口资产测试", QStyle.SP_FileDialogContentsView, [
+                ("接口资产", 1, QStyle.SP_FileDialogDetailedView),
                 ("测试用例与执行", 3, QStyle.SP_MediaPlay),
+                ("业务流程与执行", 7, QStyle.SP_FileDialogInfoView),
             ]),
         ], direct_entries=[
-            ("历史报告", 4, QStyle.SP_FileDialogInfoView),
+            ("接口测试报告", 4, QStyle.SP_FileDialogInfoView),
         ])
         self._add_sidebar_group("系统配置", QStyle.SP_FileDialogInfoView, [
             ("AI 写作中心", 8, QStyle.SP_MessageBoxInformation, lambda: self._activate_ai_hub_tab(0)),
@@ -319,6 +575,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(QWidget())  # Page 6 is retained for saved navigation compatibility.
         self.pages.addWidget(self._workflow_page())
         self.pages.addWidget(self._ai_hub_page())
+        self.pages.addWidget(self._external_runner_page())
         self._activate_page(0)
         self.quick_ai_panel = self._quick_ai_sidebar()
         body = QWidget(); body.setObjectName("WorkspaceBody")
@@ -703,12 +960,18 @@ class MainWindow(QMainWindow):
         self._set_primary_header_active()
         self.pages.setCurrentIndex(page_index)
         page_names = {
-            0: "项目中心", 1: "接口资产", 2: "环境校验", 3: "测试用例与执行",
-            4: "历史报告", 5: "能力中心", 6: "模型与连接", 7: "业务流程与测试执行", 8: "AI 协作中心",
+            0: "项目管理", 1: "接口资产", 2: "环境校验", 3: "测试用例与执行",
+            4: "接口测试报告", 5: "能力中心", 6: "模型与连接", 7: "业务流程与执行", 8: "AI 协作中心", 9: "外部 Runner",
         }
         if hasattr(self, "breadcrumb"):
             section = "系统配置" if page_index == 8 else "接口测试"
-            self.breadcrumb.setText(f"首页  /  {section}  /  {page_names.get(page_index, '工作台')}")
+            route_names = {
+                0: "基础配置", 2: "基础配置", 9: "路线 A：外部工程测试",
+                1: "路线 B：接口资产测试", 3: "路线 B：接口资产测试", 7: "路线 B：接口资产测试",
+            }
+            route = route_names.get(page_index)
+            trail = f"{section}  /  {route}  /  " if route else f"{section}  /  "
+            self.breadcrumb.setText(f"首页  /  {trail}{page_names.get(page_index, '工作台')}")
         for index, buttons in self._nav_buttons.items():
             for button in buttons:
                 route = button.property("route")
@@ -770,12 +1033,12 @@ class MainWindow(QMainWindow):
         mode = QLabel("统一管理多个测试项目，并按资料源、模块和接口查看项目资产")
         mode.setObjectName("PageSubtitle")
         row = QHBoxLayout()
-        self.projects = QComboBox(); self.projects.currentIndexChanged.connect(self._project_changed)
+        self.projects = BelowPopupComboBox(); self.projects.currentIndexChanged.connect(self._project_changed)
         self.projects.setMinimumWidth(300)
         delete_btn = QPushButton("删除项目"); delete_btn.clicked.connect(self.delete_project)
         self.source_filter_home = QLineEdit(); self.source_filter_home.setPlaceholderText("筛选当前项目的资料名称或类型")
         self.source_filter_home.textChanged.connect(self.refresh_source_table)
-        self.import_type = QComboBox()
+        self.import_type = BelowPopupComboBox()
         self.import_type.addItems([
             "OpenAPI / Swagger 文件", "在线 OpenAPI URL", "Postman Collection",
             "Postman Environment", "Apifox 数据", "cURL 命令", "HAR 请求记录",
@@ -905,7 +1168,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self); dialog.setWindowTitle("导入项目"); dialog.setMinimumWidth(420)
         form = QFormLayout(dialog); form.setContentsMargins(24, 20, 24, 16); form.setSpacing(14)
         project_name_input = QLineEdit(); project_name_input.setPlaceholderText("例如：钢厂后端、恋爱日记")
-        import_kind = QComboBox(); import_kind.addItems(options)
+        import_kind = BelowPopupComboBox(); import_kind.addItems(options)
         form.addRow("项目名称", project_name_input)
         form.addRow("导入类型", import_kind)
         tip = QLabel("确认后将选择对应的文件或后端源码目录。"); tip.setObjectName("PageSubtitle")
@@ -942,7 +1205,8 @@ class MainWindow(QMainWindow):
             options[4]: ("选择接口文档", "接口文档 (*.md *.txt *.html *.htm *.xlsx *.xlsm *.docx *.pdf)"),
             options[5]: ("选择 HAR 文件", "HAR (*.har *.json)"),
         }
-        path, _ = QFileDialog.getOpenFileName(self, *filters[choice])
+        dialog_title, file_filter = filters[choice]
+        path, _ = QFileDialog.getOpenFileName(self, dialog_title, "", file_filter)
         if not path:
             return
         try:
@@ -990,7 +1254,8 @@ class MainWindow(QMainWindow):
                     options[4]: ("选择接口文档", "接口文档 (*.md *.txt *.html *.htm *.xlsx *.xlsm *.docx *.pdf)"),
                     options[5]: ("选择 HAR 文件", "HAR (*.har *.json)"),
                 }
-                path, _ = QFileDialog.getOpenFileName(self, *filters[choice])
+                dialog_title, file_filter = filters[choice]
+                path, _ = QFileDialog.getOpenFileName(self, dialog_title, "", file_filter)
                 if not path: return
                 parsers = {options[1]: OpenApiParser(), options[2]: PostmanParser(), options[3]: ApifoxParser(), options[4]: DocumentParser(), options[5]: HarParser()}
                 self._save_document(Path(path).name, parsers[choice].parse_file(path))
@@ -1031,9 +1296,9 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("路线 A、路线 B 共用的用例审核、批量执行和结果分析中心"); subtitle.setObjectName("PageSubtitle")
         self.case_project_label = QLabel("当前项目：未选择"); self.case_project_label.setObjectName("ContextBanner")
         scope_row = QHBoxLayout()
-        self.case_project_selector = QComboBox()
+        self.case_project_selector = BelowPopupComboBox()
         self.case_project_selector.currentIndexChanged.connect(self.select_case_project)
-        self.case_module_filter = QComboBox()
+        self.case_module_filter = BelowPopupComboBox()
         self.case_module_filter.currentIndexChanged.connect(self.refresh_cases)
         scope_row.addWidget(QLabel("测试项目"))
         scope_row.addWidget(self.case_project_selector, 1)
@@ -1066,6 +1331,9 @@ class MainWindow(QMainWindow):
         self.case_table = QTableWidget(0, 5)
         self.case_table.setHorizontalHeaderLabels(["ID", "名称", "优先级", "状态", "风险"])
         self.case_table.setSelectionBehavior(QTableWidget.SelectRows)
+        # Selection must never create an inline editor.  Editing is an explicit
+        # action through the “编辑用例” button, which prevents text/input overlap.
+        self.case_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.run_output = QTextEdit(); self.run_output.setReadOnly(True)
         self.run_progress = QProgressBar(); self.run_progress.setRange(0, 100)
         # The project selector immediately below already identifies the project;
@@ -1109,8 +1377,8 @@ class MainWindow(QMainWindow):
             visual_layout.addWidget(block, 1)
             if pos < 2:
                 arrow = QLabel("→"); arrow.setObjectName("RecognitionArrow"); arrow.setAlignment(Qt.AlignCenter); visual_layout.addWidget(arrow)
-        self.workflow_project_selector = QComboBox(); self.workflow_project_selector.currentIndexChanged.connect(self.select_workflow_project)
-        source_scope = QComboBox(); source_scope.addItem("已导入项目源码"); source_scope.setEnabled(False)
+        self.workflow_project_selector = BelowPopupComboBox(); self.workflow_project_selector.currentIndexChanged.connect(self.select_workflow_project)
+        source_scope = BelowPopupComboBox(); source_scope.addItem("已导入项目源码"); source_scope.setEnabled(False)
         choices = QHBoxLayout(); choices.addWidget(QLabel("源码范围")); choices.addWidget(source_scope, 1)
         checks = QHBoxLayout()
         for text in ("控制器", "服务层", "数据模型", "配置文件", "数据库操作"):
@@ -1139,7 +1407,7 @@ class MainWindow(QMainWindow):
         settings = QFrame(); settings.setObjectName("RecognitionCard")
         setting_layout = QVBoxLayout(settings); setting_layout.setContentsMargins(18, 16, 18, 16); setting_layout.setSpacing(14)
         setting_layout.addWidget(QLabel("识别设置", objectName="PanelTitle")); setting_layout.addWidget(QLabel("识别深度"))
-        depth = QComboBox(); depth.addItems(["标准（平衡识别速度与深度）", "快速（仅识别接口关系）", "深入（包含数据与异常路径）"]); setting_layout.addWidget(depth)
+        depth = BelowPopupComboBox(); depth.addItems(["标准（平衡识别速度与深度）", "快速（仅识别接口关系）", "深入（包含数据与异常路径）"]); setting_layout.addWidget(depth)
         include_cases = BlueCheckBox("包含测试相关分支"); include_cases.setChecked(True)
         include_db = BlueCheckBox("包含数据库数据流"); include_db.setChecked(True)
         setting_layout.addWidget(include_cases); setting_layout.addWidget(include_db); setting_layout.addStretch(1)
@@ -1149,7 +1417,7 @@ class MainWindow(QMainWindow):
 
         execution = QFrame(); execution.setObjectName("WorkflowExecutionCard"); execution_layout = QVBoxLayout(execution); execution_layout.setContentsMargins(18, 16, 18, 16)
         execution_layout.addWidget(QLabel("流程确认与测试执行中心", objectName="PanelTitle"))
-        self.workflow_selector = QComboBox(); self.workflow_selector.currentIndexChanged.connect(self.load_workflow)
+        self.workflow_selector = BelowPopupComboBox(); self.workflow_selector.currentIndexChanged.connect(self.load_workflow)
         selector_row = QHBoxLayout(); selector_row.addWidget(QLabel("流程方案")); selector_row.addWidget(self.workflow_selector, 1)
         save = QPushButton("保存流程"); save.clicked.connect(self.save_workflow); confirm = QPushButton("确认识别结果"); confirm.clicked.connect(self.confirm_workflow)
         selector_row.addWidget(save); selector_row.addWidget(confirm); execution_layout.addLayout(selector_row)
@@ -1210,14 +1478,14 @@ class MainWindow(QMainWindow):
             if index < 2:
                 arrow = QLabel("→"); arrow.setObjectName("AnalysisTrackArrow")
                 analysis_track_layout.addWidget(arrow)
-        self.workflow_project_selector = QComboBox(); self.workflow_project_selector.currentIndexChanged.connect(self.select_workflow_project)
+        self.workflow_project_selector = BelowPopupComboBox(); self.workflow_project_selector.currentIndexChanged.connect(self.select_workflow_project)
         route_row = QHBoxLayout()
         view_endpoints = QPushButton("查看接口资产"); view_endpoints.clicked.connect(lambda: self.go_to_page(1))
         ai_generate = QPushButton("开始 AI 识别"); ai_generate.setProperty("primary", True); ai_generate.clicked.connect(self.generate_workflow_draft)
         manual_generate = QPushButton("手工补充测试方案"); manual_generate.clicked.connect(self.create_manual_workflow)
         route_row.addWidget(QLabel("测试项目")); route_row.addWidget(self.workflow_project_selector, 1); route_row.addWidget(view_endpoints); route_row.addWidget(ai_generate); route_row.addWidget(manual_generate); route_row.addStretch()
         selector_row = QHBoxLayout()
-        self.workflow_selector = QComboBox()
+        self.workflow_selector = BelowPopupComboBox()
         self.workflow_selector.currentIndexChanged.connect(self.load_workflow)
         save_btn = QPushButton("保存流程"); save_btn.clicked.connect(self.save_workflow)
         confirm_btn = QPushButton("确认流程"); confirm_btn.clicked.connect(self.confirm_workflow)
@@ -1347,13 +1615,554 @@ class MainWindow(QMainWindow):
         self.report_table.cellDoubleClicked.connect(lambda *_: self.open_selected_report("html"))
         open_html = QPushButton("打开 HTML 报告"); open_html.setProperty("primary", True); open_html.clicked.connect(lambda: self.open_selected_report("html"))
         open_json = QPushButton("打开 JSON 明细"); open_json.clicked.connect(lambda: self.open_selected_report("json"))
-        report_actions = QHBoxLayout(); report_actions.addWidget(refresh); report_actions.addWidget(open_html); report_actions.addWidget(open_json); report_actions.addStretch()
+        open_artifacts = QPushButton("打开 Runner 产物"); open_artifacts.clicked.connect(self.open_selected_report_artifacts)
+        report_actions = QHBoxLayout(); report_actions.addWidget(refresh); report_actions.addWidget(open_html); report_actions.addWidget(open_json); report_actions.addWidget(open_artifacts); report_actions.addStretch()
         layout.addWidget(title); layout.addWidget(subtitle); layout.addLayout(report_actions)
         layout.addWidget(self.report_table, 1); layout.addWidget(self.report_detail, 1)
         self.report_table.setAlternatingRowColors(True)
         self.report_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self._finish_page(page, layout)
         return page
+
+    def _external_runner_page(self):
+        """Register an audited external runner and archive its standard artifacts.
+
+        This screen deliberately never starts a command line.  A Runner is run by
+        its own CLI/Docker worker; the platform persists the manifest first and
+        accepts only a result whose run_id matches that immutable task.
+        """
+        page = QWidget(); layout = QVBoxLayout(page)
+        title = QLabel("外部 Runner 任务与结果"); title.setObjectName("PageTitle")
+        note = QLabel(
+            "日常只需选择环境和测试套件后“一键执行”。平台会复用首次登记的 SteelMill Runner，"
+            "自动生成任务、运行并归档结果；Docker / CI 的手工导入收在下方高级入口。"
+        )
+        note.setObjectName("PageSubtitle"); note.setWordWrap(True)
+        self.runner_project_label = QLabel("当前项目：未选择"); self.runner_project_label.setObjectName("ContextBanner")
+
+        quick_card = QFrame(); quick_card.setObjectName("RunnerConfigCard")
+        quick_layout = QGridLayout(quick_card)
+        quick_layout.setContentsMargins(18, 16, 18, 16); quick_layout.setHorizontalSpacing(16); quick_layout.setVerticalSpacing(10)
+        quick_title = QLabel("一键执行 SteelMill"); quick_title.setObjectName("PanelTitle")
+        quick_hint = QLabel("自动创建 Manifest 并归档 result.json；不会显示或写入密码、Token。")
+        quick_hint.setObjectName("ValidationHint"); quick_hint.setWordWrap(True)
+        self.auto_runner_environment = BelowPopupComboBox()
+        self.auto_runner_suite = BelowPopupComboBox()
+        self.auto_runner_suite.addItem("只读 Smoke（两个 GET 核心接口）", "run-manifest.readonly-smoke.example.json")
+        self.auto_runner_suite.addItem("离线 Unit（不访问服务）", "run-manifest.unit.example.json")
+        self.auto_runner_status = QLabel(); self.auto_runner_status.setObjectName("ValidationHint"); self.auto_runner_status.setVisible(False)
+        auto_run_btn = QPushButton("▶ 一键执行"); auto_run_btn.setProperty("primary", True); auto_run_btn.clicked.connect(self.run_registered_steelmill)
+        quick_layout.addWidget(quick_title, 0, 0, 1, 5); quick_layout.addWidget(quick_hint, 1, 0, 1, 5)
+        quick_form = QHBoxLayout(); quick_form.setSpacing(10)
+        environment_field = QHBoxLayout(); environment_field.setSpacing(8); environment_field.addWidget(QLabel("环境")); environment_field.addWidget(self.auto_runner_environment, 1)
+        suite_field = QHBoxLayout(); suite_field.setSpacing(8); suite_field.addWidget(QLabel("套件")); suite_field.addWidget(self.auto_runner_suite, 1)
+        quick_form.addLayout(environment_field, 1); quick_form.addSpacing(28); quick_form.addLayout(suite_field, 1); quick_form.addSpacing(28); quick_form.addWidget(auto_run_btn)
+        quick_layout.addLayout(quick_form, 2, 0, 1, 5); quick_layout.addWidget(self.auto_runner_status, 3, 0, 1, 5)
+
+        register_card = QFrame(); register_card.setObjectName("RunnerConfigCard")
+        register_layout = QGridLayout(register_card)
+        register_layout.setContentsMargins(18, 16, 18, 16); register_layout.setHorizontalSpacing(14); register_layout.setVerticalSpacing(8)
+        register_title = QLabel("高级设置：首次接入或升级 Runner 时配置"); register_title.setObjectName("PanelTitle")
+        self.runner_project_key = QLineEdit("steelmill")
+        self.runner_name = QLineEdit("steelmill-runner")
+        self.runner_version = QLineEdit("0.1.0")
+        self.runner_workdir = QLineEdit(); self.runner_workdir.setPlaceholderText("SteelMill python_api_tests 工作目录")
+        self.runner_python_executable = QLineEdit(); self.runner_python_executable.setPlaceholderText("运行 SteelMill 的 python.exe 完整路径")
+        self.runner_image = QLineEdit(); self.runner_image.setPlaceholderText("可选：例如 steelmill-runner:0.1.0")
+        self.runner_enabled = QCheckBox("启用此 Runner"); self.runner_enabled.setChecked(True)
+        register_btn = QPushButton("保存 Adapter 与 Runner"); register_btn.setProperty("primary", True)
+        register_btn.clicked.connect(self.save_external_runner)
+        self.runner_save_status = QLabel("未保存"); self.runner_save_status.setObjectName("ValidationHint")
+        register_layout.addWidget(register_title, 0, 0, 1, 4)
+        register_layout.addWidget(QLabel("项目 Adapter Key"), 1, 0); register_layout.addWidget(self.runner_project_key, 1, 1)
+        register_layout.addWidget(QLabel("Runner 名称"), 1, 2); register_layout.addWidget(self.runner_name, 1, 3)
+        register_layout.addWidget(QLabel("Runner 版本"), 2, 0); register_layout.addWidget(self.runner_version, 2, 1)
+        register_layout.addWidget(QLabel("镜像标识"), 2, 2); register_layout.addWidget(self.runner_image, 2, 3)
+        register_layout.addWidget(QLabel("SteelMill Python"), 3, 0); register_layout.addWidget(self.runner_python_executable, 3, 1, 1, 3)
+        register_layout.addWidget(QLabel("工作目录"), 4, 0); register_layout.addWidget(self.runner_workdir, 4, 1, 1, 3)
+        register_layout.addWidget(self.runner_enabled, 5, 0); register_layout.addWidget(self.runner_save_status, 5, 1, 1, 2); register_layout.addWidget(register_btn, 5, 3)
+        manual_card = QFrame(); manual_card.setObjectName("RunnerManualCard")
+        actions = QHBoxLayout(manual_card); actions.setContentsMargins(14, 10, 14, 10); actions.setSpacing(10)
+        queue_btn = QPushButton("导入 Manifest 并入队"); queue_btn.setProperty("primary", True); queue_btn.clicked.connect(self.queue_external_manifest)
+        archive_btn = QPushButton("导入 result.json 并归档"); archive_btn.clicked.connect(self.archive_external_result)
+        refresh_btn = QPushButton("刷新任务"); refresh_btn.clicked.connect(self.refresh_external_runner_runs)
+        self.runner_platform_run_id = QLineEdit(); self.runner_platform_run_id.setPlaceholderText("平台任务 ID（选择表格行后自动填入）")
+        actions.addWidget(queue_btn); actions.addWidget(self.runner_platform_run_id, 1); actions.addWidget(archive_btn); actions.addWidget(refresh_btn)
+        self.runner_run_table = QTableWidget(0, 9)
+        self.runner_run_table.setHorizontalHeaderLabels(["任务 ID", "run_id", "Runner", "环境", "状态", "创建时间", "结束时间", "产物目录", "操作"])
+        self.runner_run_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.runner_run_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.runner_run_table.setAlternatingRowColors(True)
+        self.runner_run_table.verticalHeader().setVisible(False)
+        runner_header = self.runner_run_table.horizontalHeader()
+        for column in (0, 2, 3, 5, 6):
+            runner_header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        runner_header.setSectionResizeMode(1, QHeaderView.Interactive)
+        runner_header.setSectionResizeMode(4, QHeaderView.Fixed)
+        runner_header.setSectionResizeMode(7, QHeaderView.Stretch)
+        runner_header.setSectionResizeMode(8, QHeaderView.Fixed)
+        self.runner_run_table.setColumnWidth(1, 210)
+        self.runner_run_table.setColumnWidth(4, 92)
+        self.runner_run_table.setColumnWidth(8, 112)
+        self.runner_run_table.verticalHeader().setDefaultSectionSize(38)
+        self.runner_run_table.setObjectName("RunnerRunTable")
+        self.runner_run_table.itemSelectionChanged.connect(self.show_external_runner_run)
+        self.runner_run_table.cellDoubleClicked.connect(lambda row, _column: self.runner_run_table.selectRow(row))
+        detail_card = QFrame(); detail_card.setObjectName("RunnerDetailCard")
+        detail_layout = QVBoxLayout(detail_card); detail_layout.setContentsMargins(16, 12, 16, 12); detail_layout.setSpacing(8)
+        detail_title = QLabel("任务详情（JSON）"); detail_title.setObjectName("PanelTitle")
+        copy_detail = QPushButton("复制 JSON"); copy_detail.clicked.connect(self.copy_runner_run_detail)
+        detail_header = QHBoxLayout(); detail_header.addWidget(detail_title); detail_header.addStretch(); detail_header.addWidget(copy_detail)
+        self.runner_run_detail = QTextEdit(); self.runner_run_detail.setReadOnly(True); self.runner_run_detail.setObjectName("RunnerRunDetail")
+        self.runner_run_detail.setPlaceholderText("选择一条任务后显示实际执行命令、Manifest、结果与产物目录。")
+        detail_layout.addLayout(detail_header); detail_layout.addWidget(self.runner_run_detail)
+        layout.addWidget(title); layout.addWidget(note); layout.addWidget(self.runner_project_label); layout.addWidget(register_card)
+        layout.addWidget(quick_card); layout.addWidget(manual_card); layout.addWidget(self.runner_run_table, 1); layout.addWidget(detail_card, 1)
+        self._finish_page(page, layout)
+        layout.setContentsMargins(28, 16, 28, 16); layout.setSpacing(10)
+        return page
+
+    def _require_runner_project(self) -> int | None:
+        if self.current_project_id:
+            return self.current_project_id
+        QMessageBox.information(self, "外部 Runner", "请先在项目中心创建并选择一个 TestPilot 项目。")
+        return None
+
+    def save_external_runner(self):
+        project_id = self._require_runner_project()
+        if project_id is None:
+            return
+        try:
+            python_executable = Path(self.runner_python_executable.text().strip())
+            working_directory = Path(self.runner_workdir.text().strip())
+            if not python_executable.is_file():
+                raise ValueError("请填写存在的 SteelMill Python 解释器完整路径")
+            if not working_directory.is_dir():
+                raise ValueError("请填写存在的 SteelMill python_api_tests 工作目录")
+            self.db.save_project_adapter(project_id, self.runner_project_key.text(), {"managed_by": "TestPilot"})
+            self.db.save_runner(
+                project_id, self.runner_name.text(), command=str(python_executable), working_directory=str(working_directory),
+                image=self.runner_image.text(), version=self.runner_version.text(),
+                capabilities={
+                    "manifest": "1.0", "result": "1.0",
+                    "python_sha256": self._runner_file_sha256(python_executable),
+                }, enabled=self.runner_enabled.isChecked(),
+            )
+        except (ValueError, OSError) as exc:
+            self.runner_save_status.setText(f"保存失败：{exc}")
+            QMessageBox.warning(self, "保存失败", str(exc)); return
+        self.refresh_external_runner_runs()
+        self.runner_save_status.setText(
+            f"已保存：{self.runner_project_key.text().strip()} / {self.runner_name.text().strip()} {self.runner_version.text().strip()}"
+        )
+        self.statusBar().showMessage("外部 Runner 已保存；可使用上方一键执行。", 5000)
+        QMessageBox.information(self, "Runner 已保存", "Runner 已登记。日常请直接使用上方“一键执行”。")
+
+    @staticmethod
+    def _runner_file_sha256(path: Path) -> str:
+        """Fingerprint the registered interpreter before using it again."""
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def run_registered_steelmill(self):
+        """Run the registered local SteelMill Runner without exposing a shell UI.
+
+        Only the saved Python executable is launched, with fixed module and
+        arguments.  The manifest is generated by the platform and the result is
+        completed automatically, so users never type a work order in daily use.
+        """
+        project_id = self._require_runner_project()
+        if project_id is None:
+            return
+        runner = self.db.get_runner_by_name(project_id, "steelmill-runner")
+        if runner is None or not runner["enabled"]:
+            QMessageBox.warning(self, "未配置 Runner", "请先在高级设置中保存并启用 steelmill-runner。"); return
+        python_executable = Path(str(runner.get("command") or ""))
+        working_directory = Path(str(runner.get("working_directory") or ""))
+        if not python_executable.is_file() or not working_directory.is_dir():
+            QMessageBox.warning(self, "Runner 配置无效", "请在高级设置中重新保存有效的 Python 解释器和 SteelMill 工作目录。"); return
+        environment_name = self.auto_runner_environment.currentData() or self.auto_runner_environment.currentText().strip()
+        environment = self.db.get_environment(project_id, str(environment_name)) if environment_name else None
+        if environment is None:
+            QMessageBox.warning(self, "未配置环境", "请先在“环境校验”保存要执行的测试环境。"); return
+        authorization_key = f"environment_authorized:{project_id}:{environment_name}"
+        if self.db.get_setting(authorization_key) != "1":
+            QMessageBox.warning(
+                self, "环境未授权", "请先在“环境校验”确认目标为授权的测试/预发布环境并保存。"
+            ); return
+        expected_hash = str((runner.get("capabilities") or {}).get("python_sha256") or "")
+        if expected_hash and self._runner_file_sha256(python_executable) != expected_hash:
+            QMessageBox.warning(
+                self, "Runner 校验失败", "已登记的 Python 解释器文件已变化，请在高级设置中重新确认并保存 Runner。"
+            ); return
+        template = working_directory / "examples" / str(self.auto_runner_suite.currentData() or "")
+        if not template.is_file():
+            QMessageBox.warning(self, "套件不存在", f"未找到套件模板：{template}"); return
+        try:
+            payload = json.loads(template.read_text(encoding="utf-8"))
+            run_id = f"steelmill_{datetime.now():%Y%m%d_%H%M%S_%f}"
+            artifacts_dir = working_directory / "reports" / run_id
+            artifacts_dir.mkdir(parents=True, exist_ok=False)
+            payload["run_id"] = run_id
+            payload["environment_id"] = str(environment_name)
+            payload["artifacts_dir"] = str(artifacts_dir)
+            payload.setdefault("metadata", {}).update({"requested_by": "TestPilot desktop", "suite": self.auto_runner_suite.currentText()})
+            manifest_path = artifacts_dir / "platform-manifest.json"
+            manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            platform_run_id = queue_external_run(self.db, payload)
+            self.db.start_runner_run(platform_run_id)
+        except (OSError, ValueError, ContractError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(self, "无法创建任务", str(exc)); return
+
+        process_environment = QProcessEnvironment.systemEnvironment()
+        process_environment.insert("STEELMILL_BASE_URL", str(environment.get("base_url") or ""))
+        try:
+            runtime_values = dict(environment.get("variables") or {})
+            runtime_values.update(self.secret_store.decrypt_dict(environment.get("secrets_encrypted") or ""))
+        except (ValueError, OSError):
+            runtime_values = {}
+        username = runtime_values.get("TEST_USERNAME") or runtime_values.get("USERNAME")
+        password = runtime_values.get("TEST_PASSWORD") or runtime_values.get("PASSWORD")
+        if username:
+            process_environment.insert("STEELMILL_USERNAME", str(username))
+        if password:
+            process_environment.insert("STEELMILL_PASSWORD", str(password))
+        process = QProcess(self)
+        process.setProcessEnvironment(process_environment)
+        process.setWorkingDirectory(str(working_directory))
+        process.setProgram(str(python_executable))
+        process.setArguments(["-m", "runner", "run", "--manifest", str(manifest_path)])
+        process.finished.connect(lambda exit_code, _status, rid=platform_run_id, path=artifacts_dir: self._finish_registered_steelmill(rid, path, exit_code))
+        process.errorOccurred.connect(lambda _error, rid=platform_run_id, path=artifacts_dir: self._finish_registered_steelmill(rid, path, 2))
+        timeout = QTimer(process)
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(lambda rid=platform_run_id: self._timeout_registered_steelmill(rid))
+        timeout.start(int((payload.get("policy") or {}).get("timeout_seconds", 1800)) * 1000)
+        self._external_runner_timeouts[platform_run_id] = timeout
+        self._external_runner_processes[platform_run_id] = process
+        self.auto_runner_status.setText(f"运行中：平台任务 #{platform_run_id} · {run_id}"); self.auto_runner_status.setVisible(True)
+        self.refresh_external_runner_runs()
+        process.start()
+
+    def _timeout_registered_steelmill(self, platform_run_id: int):
+        """Stop a locally launched Runner once its immutable policy deadline expires."""
+        process = self._external_runner_processes.get(platform_run_id)
+        if process is None or process.state() == QProcess.NotRunning:
+            return
+        self._external_runner_timed_out.add(platform_run_id)
+        self.auto_runner_status.setText(f"任务 #{platform_run_id} 已超过 Manifest 超时限制，正在停止 Runner…")
+        self.auto_runner_status.setVisible(True)
+        process.terminate()
+        QTimer.singleShot(5000, lambda rid=platform_run_id: self._force_stop_registered_steelmill(rid))
+
+    def _force_stop_registered_steelmill(self, platform_run_id: int):
+        process = self._external_runner_processes.get(platform_run_id)
+        if process is not None and process.state() != QProcess.NotRunning:
+            process.kill()
+
+    def _finish_registered_steelmill(self, platform_run_id: int, artifacts_dir: Path, exit_code: int):
+        """Archive a local process result once; failures still produce evidence."""
+        stored = self.db.get_runner_run(platform_run_id)
+        if stored is None or stored["status"] not in {"queued", "running"}:
+            return
+        result_path = artifacts_dir / "result.json"
+        try:
+            if platform_run_id in self._external_runner_timed_out:
+                result = {
+                    "schema_version": "1.0", "run_id": stored["run_key"], "status": "error",
+                    "summary": {"total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0},
+                    "cases": [], "artifacts": {"root": str(artifacts_dir)},
+                    "error": "Runner 超过 Manifest policy.timeout_seconds，已由平台停止",
+                }
+            elif result_path.is_file():
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                validate_local_runner_artifacts(artifacts_dir, result)
+            else:
+                result = {
+                    "schema_version": "1.0", "run_id": stored["run_key"], "status": "error",
+                    "summary": {"total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0},
+                    "cases": [], "artifacts": {"root": str(artifacts_dir)},
+                    "error": f"Runner 未生成 result.json，进程退出码：{exit_code}",
+                }
+            complete_external_run(self.db, platform_run_id, result)
+            self._archive_runner_report(platform_run_id, result)
+            final_status = str(result.get("status") or "error")
+            self.auto_runner_status.setText(f"已自动归档：平台任务 #{platform_run_id} · {final_status}"); self.auto_runner_status.setVisible(True)
+        except (OSError, ValueError, ContractError, json.JSONDecodeError) as exc:
+            self.auto_runner_status.setText(f"任务 #{platform_run_id} 归档失败：{exc}"); self.auto_runner_status.setVisible(True)
+        finally:
+            self._external_runner_processes.pop(platform_run_id, None)
+            timeout = self._external_runner_timeouts.pop(platform_run_id, None)
+            if timeout is not None:
+                timeout.stop()
+            self._external_runner_timed_out.discard(platform_run_id)
+            self.refresh_external_runner_runs()
+
+    def _read_runner_json(self, title: str) -> tuple[dict, Path] | None:
+        path, _ = QFileDialog.getOpenFileName(self, title, "", "JSON files (*.json)")
+        if not path:
+            return None
+        try:
+            file_path = Path(path)
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("JSON 根节点必须是对象")
+            return payload, file_path
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            QMessageBox.warning(self, title, f"无法读取 JSON：{exc}")
+            return None
+
+    def queue_external_manifest(self):
+        if self._require_runner_project() is None:
+            return
+        selected = self._read_runner_json("选择 SteelMill Manifest")
+        if selected is None:
+            return
+        payload, path = selected
+        try:
+            platform_run_id = queue_external_run(self.db, payload)
+        except (ContractError, ValueError) as exc:
+            QMessageBox.warning(self, "入队被拒绝", str(exc)); return
+        self.runner_platform_run_id.setText(str(platform_run_id))
+        self.refresh_external_runner_runs()
+        QMessageBox.information(self, "已入队", f"Manifest 已登记为平台任务 #{platform_run_id}。\n请用 SteelMill CLI 或 Docker 执行：{path.name}")
+
+    def archive_external_result(self):
+        project_id = self._require_runner_project()
+        if project_id is None:
+            return
+        try:
+            platform_run_id = int(self.runner_platform_run_id.text().strip())
+        except ValueError:
+            QMessageBox.information(self, "归档结果", "请先选择一条平台任务，或填写有效的平台任务 ID。")
+            return
+        selected = self._read_runner_json("选择 SteelMill result.json")
+        if selected is None:
+            return
+        payload, _ = selected
+        try:
+            stored = self.db.get_runner_run(platform_run_id)
+            if stored is None or int(stored["project_id"]) != project_id:
+                raise ContractError("该平台任务不存在，或不属于当前项目")
+            complete_external_run(self.db, platform_run_id, payload)
+            self._archive_runner_report(platform_run_id, payload)
+        except (ContractError, ValueError) as exc:
+            QMessageBox.warning(self, "归档被拒绝", str(exc)); return
+        self.refresh_external_runner_runs()
+        self.statusBar().showMessage(f"SteelMill 结果已归档到平台任务 #{platform_run_id}。", 5000)
+
+    def _archive_runner_report(self, platform_run_id: int, result: dict, refresh: bool = True) -> None:
+        """Create a historical report index without moving or altering Runner artifacts."""
+        stored = self.db.get_runner_run(platform_run_id)
+        if stored is None:
+            return
+        project_id = int(stored["project_id"])
+        project_name = next((item["name"] for item in self.db.list_projects() if int(item["id"]) == project_id), "外部 Runner")
+        summary = dict(result.get("summary") or {})
+        summary.update({
+            "status": result.get("status") or stored.get("status"),
+            "platform_run_id": platform_run_id,
+            "runner_run_id": stored.get("run_key"),
+            "runner": stored.get("runner_name"),
+            "artifacts": result.get("artifacts") or {"root": stored.get("artifacts_dir")},
+        })
+        cases = []
+        for case in result.get("cases") or []:
+            if not isinstance(case, dict):
+                continue
+            cases.append({
+                "name": case.get("name") or case.get("id") or "未命名用例",
+                "module": case.get("module") or "SteelMill",
+                "status": case.get("status") or "unknown",
+                "elapsed_ms": case.get("elapsed_ms", 0),
+                "status_code": case.get("status_code", ""),
+                "error": case.get("error"),
+            })
+        report_dir = self.db.path.parent / "reports" / "external-runner"
+        html_path, json_path = generate_report(
+            report_dir, project_name, cases, summary,
+            report_type="SteelMill Runner 报告", route="external_runner", environment=str(stored.get("environment_name") or ""),
+        )
+        self.db.save_evidence_report(
+            project_id, "SteelMill Runner 报告", str(html_path), str(json_path), summary,
+            route="external_runner", environment=str(stored.get("environment_name") or ""),
+        )
+        self.db.audit(project_id, "archive_runner_report", {"platform_run_id": platform_run_id, "artifacts": summary["artifacts"]})
+        if refresh:
+            self.refresh_reports()
+
+    def _backfill_runner_reports(self, rows: list[dict]) -> None:
+        """Archive terminal runs created before automatic report archiving existed."""
+        if not self.current_project_id:
+            return
+        archived: set[int] = set()
+        for evidence in self.db.list_evidence_reports(self.current_project_id):
+            try:
+                platform_run_id = json.loads(evidence.get("summary_json") or "{}").get("platform_run_id")
+                if platform_run_id is not None:
+                    archived.add(int(platform_run_id))
+            except (TypeError, ValueError):
+                continue
+        created = False
+        for row in rows:
+            platform_run_id = int(row["id"])
+            result = row.get("result") or {}
+            if (
+                platform_run_id not in archived
+                and str(row.get("status") or "") in {"passed", "failed", "error"}
+                and isinstance(result, dict)
+                and result
+            ):
+                self._archive_runner_report(platform_run_id, result, refresh=False)
+                created = True
+        if created:
+            self.refresh_reports()
+
+    def _runner_action_icon(self, kind: str) -> QIcon:
+        """Small local SVG icons: consistent blue rendering on every Windows font set."""
+        paths = {
+            "view": "<path d='M2.5 12s3.2-5.5 9.5-5.5S21.5 12 21.5 12 18.3 17.5 12 17.5 2.5 12 2.5 12z'/><circle cx='12' cy='12' r='2.5'/>",
+            "download": "<path d='M12 3v11M8 10l4 4 4-4M4 19h16'/>",
+            "delete": "<path d='M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5'/>",
+        }
+        svg = (
+            "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'>"
+            "<g fill='none' stroke='#1677e8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>"
+            + paths[kind] + "</g></svg>"
+        )
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pixmap = QPixmap(24, 24); pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap); renderer.render(painter); painter.end()
+        return QIcon(pixmap)
+
+    def refresh_external_runner_runs(self):
+        if not hasattr(self, "runner_run_table"):
+            return
+        environments = self.db.list_environments(self.current_project_id) if self.current_project_id else []
+        selected_environment = self.auto_runner_environment.currentData() if hasattr(self, "auto_runner_environment") else None
+        if hasattr(self, "auto_runner_environment"):
+            self.auto_runner_environment.blockSignals(True); self.auto_runner_environment.clear()
+            for environment in environments:
+                self.auto_runner_environment.addItem(environment["name"], environment["name"])
+            index = self.auto_runner_environment.findData(selected_environment)
+            self.auto_runner_environment.setCurrentIndex(max(0, index))
+            self.auto_runner_environment.blockSignals(False)
+        if self.current_project_id and hasattr(self, "runner_python_executable"):
+            registered = self.db.get_runner_by_name(self.current_project_id, "steelmill-runner")
+            if registered:
+                self.runner_project_key.setText(self.runner_project_key.text() or "steelmill")
+                self.runner_version.setText(str(registered.get("version") or "0.1.0"))
+                self.runner_workdir.setText(str(registered.get("working_directory") or ""))
+                self.runner_python_executable.setText(str(registered.get("command") or ""))
+                self.runner_image.setText(str(registered.get("image") or ""))
+                self.runner_enabled.setChecked(bool(registered.get("enabled")))
+        rows = self.db.list_runner_runs(self.current_project_id) if self.current_project_id else []
+        self._backfill_runner_reports(rows)
+        self._runner_run_rows = rows
+        table = self.runner_run_table
+        table.blockSignals(True); table.setRowCount(len(rows))
+        try:
+            for index, row in enumerate(rows):
+                result = row.get("result") or {}
+                values = (row["id"], row.get("run_key", ""), row.get("runner_name", ""), row.get("environment_name", ""), "",
+                          row.get("created_at", ""), row.get("finished_at", ""),
+                          (result.get("artifacts") or {}).get("root") or row.get("artifacts_dir", ""))
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(str(value or ""))
+                    table.setItem(index, column, item)
+                status = str(row.get("status") or "queued").lower()
+                status_label = QLabel(status)
+                status_label.setAlignment(Qt.AlignCenter)
+                status_label.setMinimumWidth(66)
+                status_colors = {
+                    "passed": ("#e8f8ef", "#16834a", "#b7ebcb"),
+                    "failed": ("#fff0f0", "#cf3f3f", "#ffcaca"),
+                    "error": ("#fff0f0", "#cf3f3f", "#ffcaca"),
+                    "running": ("#eaf4ff", "#1677e8", "#b9d9ff"),
+                    "queued": ("#fff8e7", "#9a6800", "#f5d88a"),
+                }
+                background, foreground, border = status_colors.get(status, status_colors["queued"])
+                status_label.setStyleSheet(
+                    f"background:{background}; color:{foreground}; border:1px solid {border}; "
+                    "border-radius:10px; padding:3px 8px; font-weight:700;"
+                )
+                table.setCellWidget(index, 4, status_label)
+                actions = QWidget(); action_layout = QHBoxLayout(actions); action_layout.setContentsMargins(3, 0, 3, 0); action_layout.setSpacing(3)
+                view = QToolButton(); view.setIcon(self._runner_action_icon("view")); view.setIconSize(QSize(17, 17)); view.setAutoRaise(True); view.setToolTip("查看执行内容、命令和结果"); view.clicked.connect(lambda _=False, i=index: table.selectRow(i))
+                open_artifacts = QToolButton(); open_artifacts.setIcon(self._runner_action_icon("download")); open_artifacts.setIconSize(QSize(17, 17)); open_artifacts.setAutoRaise(True); open_artifacts.setToolTip("打开产物目录"); open_artifacts.clicked.connect(lambda _=False, i=index: self.open_runner_artifacts(i))
+                delete_run = QToolButton(); delete_run.setIcon(self._runner_action_icon("delete")); delete_run.setIconSize(QSize(17, 17)); delete_run.setAutoRaise(True); delete_run.setToolTip("删除此平台任务和对应历史报告"); delete_run.clicked.connect(lambda _=False, i=index: self.delete_runner_task(i))
+                for button in (view, open_artifacts, delete_run):
+                    button.setFixedSize(28, 28)
+                action_layout.addWidget(view); action_layout.addWidget(open_artifacts); action_layout.addWidget(delete_run)
+                table.setCellWidget(index, 8, actions)
+        finally:
+            table.blockSignals(False)
+
+    def delete_runner_task(self, row_index: int):
+        if row_index < 0 or row_index >= len(getattr(self, "_runner_run_rows", [])):
+            return
+        row = self._runner_run_rows[row_index]
+        run_id = int(row["id"])
+        if QMessageBox.question(
+            self, "删除 Runner 任务", f"确定删除平台任务 #{run_id} 及其历史报告索引吗？\n不会删除 SteelMill 原始产物目录。"
+        ) != QMessageBox.Yes:
+            return
+        for evidence in self.db.list_evidence_reports(int(row["project_id"])):
+            try:
+                platform_run_id = json.loads(evidence.get("summary_json") or "{}").get("platform_run_id")
+                if int(platform_run_id) == run_id:
+                    self.db.delete_evidence_report(int(evidence["id"]))
+            except (TypeError, ValueError):
+                continue
+        self.db.delete_runner_run(run_id)
+        self.refresh_external_runner_runs(); self.refresh_reports()
+        self.statusBar().showMessage(f"已删除平台任务 #{run_id}，原始产物目录未删除。", 4000)
+
+    def show_external_runner_run(self):
+        row_index = self.runner_run_table.currentRow()
+        if row_index < 0 or row_index >= len(getattr(self, "_runner_run_rows", [])):
+            return
+        row = self._runner_run_rows[row_index]
+        self.runner_platform_run_id.setText(str(row["id"]))
+        result = row.get("result") or {}
+        runner = self.db.get_runner_by_name(int(row["project_id"]), str(row.get("runner_name") or ""))
+        artifacts = result.get("artifacts") or {"root": row.get("artifacts_dir")}
+        artifacts_root = str(artifacts.get("root") or row.get("artifacts_dir") or "")
+        manifest_path = str(Path(artifacts_root) / "platform-manifest.json") if artifacts_root else ""
+        execution = {
+            "runner": row.get("runner_name"),
+            "python": (runner or {}).get("command") or "由外部 Runner 提供",
+            "working_directory": (runner or {}).get("working_directory") or "由外部 Runner 提供",
+            "command": f"{(runner or {}).get('command') or 'python'} -m runner run --manifest {manifest_path or '<Manifest 文件>'}",
+            "suite": (row.get("manifest") or {}).get("metadata", {}).get("suite", ""),
+        }
+        payload = {"execution": execution, "manifest": row.get("manifest") or {}, "result": result, "artifacts": artifacts}
+        self.runner_run_detail.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
+    def copy_runner_run_detail(self):
+        QApplication.clipboard().setText(self.runner_run_detail.toPlainText())
+        self.statusBar().showMessage("任务 JSON 已复制。", 3000)
+
+    def open_runner_artifacts(self, row_index: int):
+        if row_index < 0 or row_index >= len(getattr(self, "_runner_run_rows", [])):
+            return
+        row = self._runner_run_rows[row_index]
+        root = (row.get("result") or {}).get("artifacts", {}).get("root") or row.get("artifacts_dir")
+        path = Path(str(root or ""))
+        if not path.is_dir():
+            QMessageBox.warning(self, "产物目录不存在", f"未找到产物目录：{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
+    def copy_runner_manifest(self, row_index: int):
+        if row_index < 0 or row_index >= len(getattr(self, "_runner_run_rows", [])):
+            return
+        manifest = self._runner_run_rows[row_index].get("manifest") or {}
+        QApplication.clipboard().setText(json.dumps(manifest, ensure_ascii=False, indent=2))
+        self.statusBar().showMessage("Manifest 已复制。", 3000)
 
     def _capability_page(self):
         page = QWidget(); layout = QVBoxLayout(page)
@@ -1531,7 +2340,7 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda checked=False, value=prompt: self.use_ai_template(value)); templates.addWidget(button)
         templates.addStretch()
         controls = QHBoxLayout()
-        self.ai_dialogue_route = QComboBox(); self.ai_dialogue_route.addItem("智能对话 · 可测试编排", "chat"); self.ai_dialogue_route.addItem("路线 A · 源码 + 数据库", "route_a"); self.ai_dialogue_route.addItem("路线 B · 接口资料", "route_b"); self.ai_dialogue_route.addItem("组合检查 · A+B", "combined")
+        self.ai_dialogue_route = BelowPopupComboBox(); self.ai_dialogue_route.addItem("智能对话 · 可测试编排", "chat"); self.ai_dialogue_route.addItem("路线 A · 源码 + 数据库", "route_a"); self.ai_dialogue_route.addItem("路线 B · 接口资料", "route_b"); self.ai_dialogue_route.addItem("组合检查 · A+B", "combined")
         approve = QPushButton("批准测试草稿"); approve.clicked.connect(self.approve_latest_ai_artifact); approve.setProperty("primary", True)
         reject = QPushButton("退回修改"); reject.clicked.connect(self.reject_latest_ai_artifact)
         controls.addWidget(QLabel("对话模式")); controls.addWidget(self.ai_dialogue_route, 1); controls.addWidget(approve); controls.addWidget(reject)
@@ -1542,7 +2351,7 @@ class MainWindow(QMainWindow):
         composer = QFrame(); composer.setObjectName("AIComposer"); composer_layout = QVBoxLayout(composer); composer_layout.setContentsMargins(14, 12, 14, 12); composer_layout.setSpacing(8)
         self.ai_dialogue_input = QTextEdit(); self.ai_dialogue_input.setObjectName("AIComposerInput"); self.ai_dialogue_input.setMaximumHeight(86)
         self.ai_dialogue_input.setPlaceholderText("随便问我任何问题；也可以说：帮我编排并执行当前项目的登录接口测试")
-        self.ai_chat_model = QComboBox(); self.ai_chat_model.setObjectName("AIChatModelSelector"); self.ai_chat_model.setMinimumWidth(160)
+        self.ai_chat_model = BelowPopupComboBox(); self.ai_chat_model.setObjectName("AIChatModelSelector"); self.ai_chat_model.setMinimumWidth(160)
         self.ai_dialogue_send = QPushButton("发送"); self.ai_dialogue_send.clicked.connect(self.send_ai_dialogue); self.ai_dialogue_send.setProperty("primary", True); self.ai_dialogue_send.setMinimumWidth(86)
         self.ai_dialogue_cancel = QPushButton("取消生成"); self.ai_dialogue_cancel.clicked.connect(self.cancel_ai_request); self.ai_dialogue_cancel.setVisible(False)
         composer_footer = QHBoxLayout(); composer_footer.addWidget(self.ai_chat_model); composer_footer.addStretch(); composer_footer.addWidget(self.ai_dialogue_cancel); composer_footer.addWidget(self.ai_dialogue_send)
@@ -1590,57 +2399,386 @@ class MainWindow(QMainWindow):
         return panel
 
     def _endpoint_page(self):
+        return self._endpoint_page_apifox()
+
         page = QWidget(); layout = QVBoxLayout(page)
         title = QLabel("接口资产"); title.setObjectName("PageTitle")
-        subtitle = QLabel("浏览和维护接口资产；选中接口后可直接进入该接口的调试与用例保存。")
+        subtitle = QLabel("选择接口后可直接调试、查看定义或保存为测试用例。")
         subtitle.setObjectName("PageSubtitle")
-        self.endpoint_project_label = QLabel("当前项目：未选择")
-        self.endpoint_project_label.setObjectName("ContextBanner")
-        filter_row = QHBoxLayout()
-        self.endpoint_project_selector = QComboBox()
-        self.endpoint_project_selector.currentIndexChanged.connect(self.select_endpoint_project)
+        self.endpoint_project_label = QLabel("当前项目：未选择"); self.endpoint_project_label.setObjectName("ContextBanner")
+        top_filters = QHBoxLayout(); top_filters.setSpacing(10)
+        top_filters.addWidget(QLabel("测试项目"))
+        self.endpoint_project_selector = QComboBox(); self.endpoint_project_selector.currentIndexChanged.connect(self.select_endpoint_project)
+        top_filters.addWidget(self.endpoint_project_selector, 1)
+        self.search = QLineEdit(); self.search.setPlaceholderText("⌕  搜索接口名称、路径、方法")
+        top_filters.addWidget(self.search, 2)
         self.source_filter = QComboBox(); self.source_filter.addItem("全部资料源", None)
         self.module_filter = QComboBox(); self.module_filter.addItem("全部模块", None)
         self.source_filter.currentIndexChanged.connect(self.refresh_endpoints)
         self.module_filter.currentIndexChanged.connect(self.refresh_endpoints)
-        filter_row.addWidget(QLabel("测试项目"))
-        filter_row.addWidget(self.endpoint_project_selector, 1)
-        filter_row.addWidget(QLabel("资料源"))
-        filter_row.addWidget(self.source_filter)
-        filter_row.addWidget(QLabel("模块"))
-        filter_row.addWidget(self.module_filter)
-        filter_row.addStretch()
-        self.search = QLineEdit(); self.search.setPlaceholderText("搜索方法、路径、模块或摘要")
-        # Do not redraw a potentially large endpoint table for every keystroke.
-        self._endpoint_search_timer = QTimer(self)
-        self._endpoint_search_timer.setSingleShot(True)
-        self._endpoint_search_timer.setInterval(180)
-        self._endpoint_search_timer.timeout.connect(self.refresh_endpoints)
-        self.search.textChanged.connect(self._schedule_endpoint_refresh)
-        split = QSplitter(Qt.Horizontal)
-        self.endpoint_table = QTableWidget(0, 4)
-        self.endpoint_table.setHorizontalHeaderLabels(["方法", "路径", "模块", "摘要"])
+        top_filters.addWidget(self.source_filter, 1)
+        self._endpoint_search_timer = QTimer(self); self._endpoint_search_timer.setSingleShot(True); self._endpoint_search_timer.setInterval(180)
+        self._endpoint_search_timer.timeout.connect(self.refresh_endpoints); self.search.textChanged.connect(self._schedule_endpoint_refresh)
+
+        workspace = QSplitter(Qt.Horizontal); workspace.setObjectName("EndpointWorkbench")
+        group_card = QFrame(); group_card.setObjectName("EndpointGroupCard")
+        group_layout = QVBoxLayout(group_card); group_layout.setContentsMargins(12, 12, 12, 12); group_layout.setSpacing(8)
+        group_header = QHBoxLayout(); group_title = QLabel("接口分组"); group_title.setObjectName("PanelTitle")
+        add_group = QPushButton("▦"); add_group.setToolTip("模块按接口导入数据自动生成")
+        group_header.addWidget(group_title); group_header.addStretch(); group_header.addWidget(add_group)
+        self.endpoint_tree = QTreeWidget(); self.endpoint_tree.setObjectName("EndpointNavigator"); self.endpoint_tree.setHeaderHidden(True)
+        self.endpoint_tree.itemClicked.connect(self.select_endpoint_tree_item)
+        add_endpoint = QPushButton("＋ 新建分组接口"); add_endpoint.clicked.connect(self.add_endpoint)
+        group_layout.addLayout(group_header); group_layout.addWidget(self.endpoint_tree, 1); group_layout.addWidget(add_endpoint)
+
+        # The table is retained as the selection model used by existing import,
+        # edit and delete flows.  The user-facing navigator is the module tree.
+        self.endpoint_table = QTableWidget(0, 3); self.endpoint_table.setObjectName("EndpointList")
+        self.endpoint_table.setHorizontalHeaderLabels(["方法", "接口名称", "路径"])
         self.endpoint_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.endpoint_table.itemSelectionChanged.connect(self.show_endpoint)
-        self.endpoint_detail = QTextEdit(); self.endpoint_detail.setReadOnly(True)
-        split.addWidget(self.endpoint_table); split.addWidget(self.endpoint_detail)
-        split.setSizes([700, 500])
-        actions = QHBoxLayout()
-        debug_btn = QPushButton("调试选中接口"); debug_btn.clicked.connect(self.debug_selected_endpoint)
-        add_btn = QPushButton("手工添加"); add_btn.clicked.connect(self.add_endpoint)
+        self.endpoint_table.itemSelectionChanged.connect(self.show_endpoint); self.endpoint_table.setVisible(False)
+
+        request_card = QFrame(); request_card.setObjectName("EndpointRequestCard")
+        request_layout = QVBoxLayout(request_card); request_layout.setContentsMargins(14, 12, 14, 12); request_layout.setSpacing(8)
+        request_header = QHBoxLayout(); request_title = QLabel("调试接口"); request_title.setObjectName("PanelTitle")
+        self.endpoint_active_label = QLabel("选择左侧接口开始调试"); self.endpoint_active_label.setObjectName("EndpointActiveTab")
+        environment_selector = QComboBox(); environment_selector.addItem("开发环境（使用已保存环境）")
+        request_header.addWidget(request_title); request_header.addWidget(self.endpoint_active_label, 1); request_header.addWidget(environment_selector)
+        request_url_row = QHBoxLayout(); self.method = QComboBox(); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+        self.endpoint_url = QLineEdit(); self.endpoint_url.setReadOnly(True); self.endpoint_url.setPlaceholderText("选择接口后显示完整请求地址")
+        send = QPushButton("发送"); send.setProperty("primary", True); send.clicked.connect(self.send_request)
+        request_url_row.addWidget(self.method); request_url_row.addWidget(self.endpoint_url, 1); request_url_row.addWidget(send)
+        self.path = QLineEdit("/"); self.path.setVisible(False)
+        self.debug_endpoint_label = QLabel("使用环境校验中保存的 Base URL、账号和授权配置。")
+        self.debug_endpoint_label.setObjectName("ValidationHint")
+        self.endpoint_request_tabs = QTabWidget(); self.endpoint_request_tabs.setObjectName("EndpointRequestTabs")
+        params_tab = QLabel("接口参数会根据导入的定义显示；当前可在 Body 中填写请求数据。"); params_tab.setWordWrap(True)
+        headers_tab = QLabel("认证 Token 由已保存环境和 Runner 自动维护；手工 Header 可在后续版本扩展。"); headers_tab.setWordWrap(True)
+        body_tab = QWidget(); body_layout = QVBoxLayout(body_tab); body_layout.setContentsMargins(0, 6, 0, 0)
+        self.body = QTextEdit("{}"); self.body.setObjectName("EndpointEditor"); body_layout.addWidget(self.body)
+        auth_tab = QLabel("认证使用环境校验保存的测试账号。点击“验证登录”可安全确认。")
+        auth_tab.setWordWrap(True)
+        self.endpoint_request_tabs.addTab(params_tab, "参数")
+        self.endpoint_request_tabs.addTab(headers_tab, "Headers")
+        self.endpoint_request_tabs.addTab(body_tab, "Body")
+        self.endpoint_request_tabs.addTab(auth_tab, "认证")
+        request_actions = QHBoxLayout(); login_check = QPushButton("验证登录"); login_check.clicked.connect(self.verify_environment_login)
+        save_case = QPushButton("保存为用例"); save_case.clicked.connect(self.save_request_as_case)
         edit_btn = QPushButton("编辑 JSON"); edit_btn.clicked.connect(self.edit_endpoint)
-        delete_btn = QPushButton("删除接口"); delete_btn.clicked.connect(self.delete_endpoint)
-        actions.addWidget(debug_btn); actions.addWidget(add_btn); actions.addWidget(edit_btn); actions.addWidget(delete_btn); actions.addStretch()
-        # The project combobox below is the single source of truth.  Do not
-        # duplicate it with a tall context banner.
-        layout.addWidget(title); layout.addWidget(subtitle)
-        layout.addLayout(filter_row); layout.addWidget(self.search)
-        layout.addLayout(actions); layout.addWidget(split, 1)
-        add_btn.setProperty("primary", True)
-        debug_btn.setProperty("primary", True)
-        delete_btn.setProperty("danger", True)
-        self.endpoint_table.setAlternatingRowColors(True)
-        self.endpoint_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        delete_btn = QPushButton("删除接口"); delete_btn.setProperty("danger", True); delete_btn.clicked.connect(self.delete_endpoint)
+        request_actions.addWidget(login_check); request_actions.addWidget(save_case); request_actions.addWidget(edit_btn); request_actions.addWidget(delete_btn); request_actions.addStretch()
+        response_title = QLabel("响应结果"); response_title.setObjectName("EndpointResponseTitle")
+        self.response = QTextEdit(); self.response.setReadOnly(True); self.response.setObjectName("EndpointEditor"); self.response.setPlaceholderText("发送请求后在此显示脱敏响应。")
+        request_layout.addLayout(request_header); request_layout.addLayout(request_url_row); request_layout.addWidget(self.debug_endpoint_label)
+        request_layout.addWidget(self.endpoint_request_tabs, 1); request_layout.addLayout(request_actions); request_layout.addWidget(response_title); request_layout.addWidget(self.response, 1)
+
+        definition_card = QFrame(); definition_card.setObjectName("EndpointDefinitionCard")
+        definition_layout = QVBoxLayout(definition_card); definition_layout.setContentsMargins(14, 12, 14, 12); definition_layout.setSpacing(8)
+        definition_title = QLabel("接口定义"); definition_title.setObjectName("PanelTitle")
+        self.endpoint_detail = QTextEdit(); self.endpoint_detail.setObjectName("EndpointDetail"); self.endpoint_detail.setReadOnly(True)
+        self.endpoint_detail.setPlaceholderText("选择接口后显示基本信息、请求参数与响应定义。")
+        definition_layout.addWidget(definition_title); definition_layout.addWidget(self.endpoint_detail, 1)
+
+        workspace.addWidget(group_card); workspace.addWidget(request_card); workspace.addWidget(definition_card)
+        workspace.setSizes([230, 610, 340])
+        group_card.setMinimumWidth(210); request_card.setMinimumWidth(500); definition_card.setMinimumWidth(300)
+        layout.addWidget(title); layout.addWidget(subtitle); layout.addLayout(top_filters); layout.addWidget(workspace, 1)
+        self._finish_page(page, layout); layout.setContentsMargins(24, 14, 24, 14); layout.setSpacing(9)
+        return page
+
+    def _endpoint_input_table(self, headings: list[str]) -> QTableWidget:
+        table = QTableWidget(1, len(headings))
+        table.setObjectName("EndpointInputTable")
+        table.setHorizontalHeaderLabels(headings)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setMinimumHeight(108)
+        for column in range(len(headings)):
+            table.setItem(0, column, QTableWidgetItem("添加参数" if column == 0 else ""))
+        return table
+
+    def _configure_http_method_selector(self, selector: QComboBox) -> None:
+        colors = {
+            "GET": "#00a854", "POST": "#f0441f", "PUT": "#1677ff", "PATCH": "#8b5cf6",
+            "DELETE": "#ef4444", "HEAD": "#06b6c9", "OPTIONS": "#d69e00",
+        }
+        for index in range(selector.count()):
+            method = selector.itemText(index).upper()
+            selector.setItemData(index, QColor(colors.get(method, "#1677e8")), Qt.ForegroundRole)
+        selector.setItemDelegate(HttpMethodItemDelegate(selector))
+        selector.currentTextChanged.connect(self._set_http_method_current_color)
+        self._set_http_method_current_color(selector.currentText())
+
+    def _set_http_method_current_color(self, method: str) -> None:
+        colors = {
+            "GET": "#00a854", "POST": "#f0441f", "PUT": "#1677ff", "PATCH": "#8b5cf6",
+            "DELETE": "#ef4444", "HEAD": "#06b6c9", "OPTIONS": "#d69e00",
+        }
+        if hasattr(self, "method"):
+            palette = self.method.palette()
+            color = QColor(colors.get(str(method).upper(), "#1677e8"))
+            palette.setColor(QPalette.ButtonText, color)
+            palette.setColor(QPalette.Text, color)
+            self.method.setPalette(palette)
+            # Qt's native combo style may ignore a palette Text role while the
+            # popup delegate is correctly coloured; explicitly keep the closed
+            # field on the same semantic method colour.
+            self.method.setStyleSheet(f"color: {color.name()};")
+
+    def _refresh_endpoint_debug_environments(self) -> None:
+        """Offer every saved development/test URL in the debugging toolbar."""
+        if not hasattr(self, "endpoint_debug_environment"):
+            return
+        selector = self.endpoint_debug_environment
+        selected = selector.currentData()
+        environments = self.db.list_environments(self.current_project_id) if self.current_project_id else []
+        selector.blockSignals(True)
+        selector.clear()
+        for environment in environments:
+            selector.addItem(str(environment.get("name") or "未命名环境"), environment.get("id"))
+        selector.addItem("配置环境 URL…", "__manage__")
+        index = selector.findData(selected)
+        selector.setCurrentIndex(index if index >= 0 else (0 if environments else selector.count() - 1))
+        selector.blockSignals(False)
+
+    def _select_endpoint_debug_environment(self, _index: int) -> None:
+        if not hasattr(self, "endpoint_debug_environment"):
+            return
+        environment_id = self.endpoint_debug_environment.currentData()
+        if environment_id == "__manage__":
+            # URL editing remains in the existing environment-validation workflow.
+            self._activate_page(2)
+            return
+        if not self.current_project_id or environment_id is None:
+            return
+        environment = next(
+            (item for item in self.db.list_environments(self.current_project_id) if item.get("id") == environment_id), None
+        )
+        if environment:
+            self._load_environment(environment)
+            self._sync_endpoint_url_query()
+
+    def _endpoint_page_apifox(self):
+        """Apifox-style interface workbench, while preserving TestPilot data flows."""
+        page = QWidget(); page.setObjectName("EndpointAssetPage")
+        layout = QVBoxLayout(page); layout.setContentsMargins(14, 12, 14, 12); layout.setSpacing(8)
+        title = QLabel("接口资产"); title.setObjectName("PageTitle")
+        subtitle = QLabel("选择接口可调试或查看定义，支持按分组管理接口，提高测试效率。")
+        subtitle.setObjectName("PageSubtitle")
+        self.endpoint_project_label = QLabel("当前项目：未选择"); self.endpoint_project_label.setVisible(False)
+
+        filters = QHBoxLayout(); filters.setSpacing(10)
+        filters.addWidget(QLabel("测试项目"))
+        self.endpoint_project_selector = BelowPopupComboBox(); self.endpoint_project_selector.setMinimumWidth(180)
+        self.endpoint_project_selector.currentIndexChanged.connect(self.select_endpoint_project)
+        filters.addWidget(self.endpoint_project_selector); filters.addStretch()
+        self.search = QLineEdit(); self.search.setObjectName("EndpointSearch"); self.search.setMinimumWidth(270)
+        self.search.setPlaceholderText("⌕  搜索接口名称、路径、方法")
+        self.source_filter = BelowPopupComboBox(); self.source_filter.setMinimumWidth(210); self.source_filter.addItem("全部资料源", None)
+        self.module_filter = BelowPopupComboBox(); self.module_filter.addItem("全部模块", None)
+        self.source_filter.currentIndexChanged.connect(self.refresh_endpoints)
+        self.module_filter.currentIndexChanged.connect(self.refresh_endpoints)
+        filters.addWidget(self.search); filters.addWidget(self.source_filter)
+        self._endpoint_search_timer = QTimer(self); self._endpoint_search_timer.setSingleShot(True); self._endpoint_search_timer.setInterval(180)
+        self._endpoint_search_timer.timeout.connect(self.refresh_endpoints); self.search.textChanged.connect(self._schedule_endpoint_refresh)
+
+        workbench = QSplitter(Qt.Horizontal); workbench.setObjectName("EndpointWorkbench")
+        groups = QFrame(); groups.setObjectName("EndpointGroupCard")
+        groups_layout = QVBoxLayout(groups); groups_layout.setContentsMargins(10, 10, 10, 10); groups_layout.setSpacing(7)
+        groups_header = QHBoxLayout(); groups_title = QLabel("接口分组"); groups_title.setObjectName("EndpointPaneTitle")
+        new_endpoint_icon = QToolButton(); new_endpoint_icon.setText("＋"); new_endpoint_icon.setToolTip("新建接口"); new_endpoint_icon.clicked.connect(self.add_endpoint)
+        groups_header.addWidget(groups_title); groups_header.addStretch(); groups_header.addWidget(new_endpoint_icon)
+        self.endpoint_tree = QTreeWidget(); self.endpoint_tree.setObjectName("EndpointNavigator"); self.endpoint_tree.setHeaderHidden(True)
+        self.endpoint_tree.itemClicked.connect(self.select_endpoint_tree_item)
+        new_group = QPushButton("＋  新建分组"); new_group.setObjectName("EndpointNewGroup"); new_group.clicked.connect(self.add_endpoint)
+        groups_layout.addLayout(groups_header); groups_layout.addWidget(self.endpoint_tree, 1); groups_layout.addWidget(new_group)
+
+        # Existing edit, delete and import flows use this hidden selection model.
+        self.endpoint_table = QTableWidget(0, 3); self.endpoint_table.setObjectName("EndpointList")
+        self.endpoint_table.setHorizontalHeaderLabels(["方法", "接口名称", "路径"])
+        self.endpoint_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.endpoint_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.endpoint_table.itemSelectionChanged.connect(self.show_endpoint); self.endpoint_table.setVisible(False)
+
+        request = QFrame(); request.setObjectName("EndpointRequestCard")
+        request_layout = QVBoxLayout(request); request_layout.setContentsMargins(12, 12, 12, 12); request_layout.setSpacing(12)
+        request_header = QHBoxLayout(); request_header.setSpacing(8); request_header.addWidget(QLabel("调试接口", objectName="EndpointPaneTitle"))
+        self.endpoint_active_label = QLabel("选择接口"); self.endpoint_active_label.setObjectName("EndpointActiveTab")
+        self.endpoint_debug_environment = BelowPopupComboBox(); self.endpoint_debug_environment.setObjectName("EndpointEnvironment")
+        self.endpoint_debug_environment.currentIndexChanged.connect(self._select_endpoint_debug_environment)
+        self.endpoint_active_label.setFixedHeight(32); self.endpoint_debug_environment.setFixedHeight(32)
+        save_case = QPushButton("保存"); save_case.setObjectName("EndpointToolbarButton"); save_case.setFixedHeight(32); save_case.clicked.connect(self.save_request_as_case)
+        more = QPushButton("更多"); more.setObjectName("EndpointToolbarButton"); more.setFixedHeight(32); more.clicked.connect(self.edit_endpoint)
+        request_header.addWidget(self.endpoint_active_label, 1); request_header.addWidget(self.endpoint_debug_environment); request_header.addWidget(save_case); request_header.addWidget(more)
+        url_row = QHBoxLayout(); url_row.setContentsMargins(0, 0, 0, 0); url_row.setSpacing(0)
+        self.method = BelowPopupComboBox(); self.method.setObjectName("EndpointMethod"); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+        self._configure_http_method_selector(self.method)
+        self.method.setFixedHeight(36); self.method.setFixedWidth(84)
+        self.endpoint_url = QLineEdit(); self.endpoint_url.setObjectName("EndpointUrl"); self.endpoint_url.setReadOnly(True); self.endpoint_url.setPlaceholderText("选择接口后显示完整请求地址"); self.endpoint_url.setFixedHeight(36)
+        send = QPushButton("发送"); send.setObjectName("EndpointSend"); send.setProperty("primary", True); send.clicked.connect(self.send_request)
+        send.setFixedHeight(36); send.setFixedWidth(54)
+        url_row.addWidget(self.method); url_row.addWidget(self.endpoint_url, 1); url_row.addSpacing(6); url_row.addWidget(send)
+        self.path = QLineEdit("/"); self.path.setVisible(False)
+
+        self.endpoint_request_tabs = QTabWidget(); self.endpoint_request_tabs.setObjectName("EndpointRequestTabs")
+        parameter_page = QWidget(); parameter_page_layout = QVBoxLayout(parameter_page); parameter_page_layout.setContentsMargins(14, 8, 14, 8); parameter_page_layout.setSpacing(8)
+        parameter_page_layout.addWidget(QLabel("Query 参数", objectName="EndpointFormTitle"))
+        self.endpoint_query_editor = KeyValueParameterEditor(
+            "参数名", "参数值", "添加参数", "参数值", shows_metadata=True
+        )
+        self.endpoint_query_editor.parametersChanged.connect(self._sync_endpoint_url_query)
+        parameter_page_layout.addWidget(self.endpoint_query_editor)
+        parameter_page_layout.addStretch()
+        body_container = QWidget(); parameter_layout = QVBoxLayout(body_container)
+        parameter_layout.setContentsMargins(0, 0, 0, 0); parameter_layout.setSpacing(5)
+        body_kind_row = QHBoxLayout(); body_kind_row.setContentsMargins(14, 0, 14, 0); body_kind_row.setSpacing(14)
+        self.endpoint_body_type_buttons: dict[str, QRadioButton] = {}
+        for key, text in (
+            ("none", "none"), ("form-data", "form-data"),
+            ("x-www-form-urlencoded", "x-www-form-urlencoded"), ("raw", "raw"), ("json", "JSON"),
+            ("xml", "XML"), ("text", "Text"), ("binary", "Binary"), ("graphql", "GraphQL"), ("msgpack", "msgpack"),
+        ):
+            radio = QRadioButton(text); radio.setObjectName("EndpointBodyType")
+            radio.setChecked(key == "json")
+            radio.toggled.connect(lambda checked, selected=key: checked and self._set_endpoint_body_type(selected))
+            self.endpoint_body_type_buttons[key] = radio
+            body_kind_row.addWidget(radio)
+        body_kind_row.addStretch()
+        format_body = QPushButton("格式化"); format_body.setObjectName("EndpointBodyFormat")
+        format_body.clicked.connect(self._format_endpoint_body)
+        body_kind_row.addWidget(format_body)
+        self.endpoint_body_format_button = format_body
+        self._endpoint_body_type = "json"
+        self.endpoint_body_stack = QStackedWidget()
+        none_page = QWidget(); none_layout = QVBoxLayout(none_page); none_layout.addStretch()
+        none_hint = QLabel("当前接口不发送请求 Body"); none_hint.setObjectName("EndpointEmptyHint"); none_hint.setAlignment(Qt.AlignCenter)
+        none_layout.addWidget(none_hint); none_layout.addStretch()
+        self.endpoint_body_form_editor = KeyValueParameterEditor(
+            "参数名", "参数值", "添加参数", "参数值", shows_metadata=True
+        )
+        self.endpoint_body_urlencoded_editor = KeyValueParameterEditor(
+            "参数名", "参数值", "添加参数", "参数值", shows_metadata=True
+        )
+        # form-data uses the same compact editor as Params.  Its page grows
+        # only when rows are actually added instead of occupying the tab body.
+        self.endpoint_body_form_editor.parametersChanged.connect(self._update_endpoint_body_editor_height)
+        self.endpoint_body_urlencoded_editor.parametersChanged.connect(self._update_endpoint_body_editor_height)
+        self.body = QTextEdit("{}"); self.body.setObjectName("EndpointBodyEditor")
+        self.body.setPlaceholderText("根据接口定义填写请求 Body")
+        self.body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        text_page = QWidget(); text_layout = QVBoxLayout(text_page); text_layout.setContentsMargins(0, 0, 0, 0); text_layout.addWidget(self.body)
+        binary_page = QWidget(); binary_layout = QHBoxLayout(binary_page); binary_layout.setContentsMargins(8, 8, 8, 8); binary_layout.setSpacing(8)
+        self.endpoint_binary_path = QLineEdit(); self.endpoint_binary_path.setReadOnly(True); self.endpoint_binary_path.setPlaceholderText("选择要作为 Binary Body 发送的文件")
+        binary_choose = QPushButton("选择文件"); binary_choose.clicked.connect(self._choose_endpoint_binary_file)
+        binary_layout.addWidget(self.endpoint_binary_path, 1); binary_layout.addWidget(binary_choose)
+        for page_widget in (none_page, self.endpoint_body_form_editor, self.endpoint_body_urlencoded_editor, text_page, binary_page):
+            self.endpoint_body_stack.addWidget(page_widget)
+        self._endpoint_body_pages = {
+            "none": none_page, "form-data": self.endpoint_body_form_editor,
+            "x-www-form-urlencoded": self.endpoint_body_urlencoded_editor, "binary": binary_page,
+            "raw": text_page, "json": text_page, "xml": text_page, "text": text_page,
+            "graphql": text_page, "msgpack": text_page,
+        }
+        self._set_endpoint_body_type("json")
+        body_editor_host = QWidget(); body_editor_layout = QHBoxLayout(body_editor_host)
+        body_editor_layout.setContentsMargins(14, 0, 14, 8); body_editor_layout.setSpacing(0)
+        # Keep the same horizontal content rule as Params, but never let a
+        # form page stretch vertically into a large empty panel.
+        self.endpoint_body_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        body_editor_layout.addWidget(self.endpoint_body_stack, 1, Qt.AlignTop)
+        parameter_layout.addLayout(body_kind_row); parameter_layout.addWidget(body_editor_host); parameter_layout.addStretch()
+        headers_page = QWidget(); headers_layout = QVBoxLayout(headers_page); headers_layout.setContentsMargins(0, 8, 0, 8); headers_layout.setSpacing(8)
+        headers_layout.addWidget(QLabel("Headers", objectName="EndpointFormTitle"))
+        self.endpoint_headers_editor = KeyValueParameterEditor("参数名", "参数值", "添加 Header", "Header 值", supports_enabled=True)
+        headers_layout.addWidget(self.endpoint_headers_editor)
+        headers_layout.addStretch()
+        cookies_page = QWidget(); cookies_layout = QVBoxLayout(cookies_page); cookies_layout.setContentsMargins(0, 8, 0, 8); cookies_layout.setSpacing(8)
+        cookies_layout.addWidget(QLabel("Cookies", objectName="EndpointFormTitle"))
+        self.endpoint_cookies_editor = KeyValueParameterEditor("Cookie 名称", "Cookie 值", "添加 Cookie", "Cookie 值", supports_enabled=True)
+        cookies_layout.addWidget(self.endpoint_cookies_editor)
+        cookies_layout.addStretch()
+        auth_page = QWidget(); auth_layout = QVBoxLayout(auth_page); auth_layout.setContentsMargins(8, 8, 8, 8); auth_layout.setSpacing(8)
+        auth_layout.addWidget(QLabel("鉴权方式", objectName="EndpointFormTitle"))
+        self.endpoint_auth_mode = BelowPopupComboBox(); self.endpoint_auth_mode.addItems(["无需鉴权", "Bearer Token", "Basic Auth"]); auth_layout.addWidget(self.endpoint_auth_mode)
+        auth_help = QFrame(); auth_help.setObjectName("EndpointAuthHelp"); auth_help_layout = QVBoxLayout(auth_help); auth_help_layout.addWidget(QLabel("无需鉴权", objectName="EndpointFormTitle")); auth_help_layout.addWidget(QLabel("登录接口可使用“验证登录”，其他接口将复用已保存测试环境的授权信息。"))
+        auth_layout.addWidget(auth_help); auth_layout.addStretch()
+        before_page = QWidget(); before_layout = QVBoxLayout(before_page); before_layout.setContentsMargins(8, 8, 8, 8)
+        before_button = QPushButton("添加前置操作  ▾"); before_button.setObjectName("EndpointAddAction")
+        before_menu = QMenu(before_button); before_menu.setObjectName("EndpointOperationMenu")
+        before_menu.aboutToShow.connect(lambda: before_menu.setFixedWidth(before_button.width()))
+        for action_name in ("数据库操作", "脚本", "脚本库", "等待时间", "从其它接口/用例/目录导入"):
+            action = before_menu.addAction(action_name); action.triggered.connect(lambda _=False, name=action_name: self._add_endpoint_operation("pre", name))
+        before_button.setMenu(before_menu); before_layout.addWidget(before_button); before_layout.addStretch()
+        self.endpoint_pre_actions_layout = before_layout
+        after_page = QWidget(); after_layout = QVBoxLayout(after_page); after_layout.setContentsMargins(8, 8, 8, 8)
+        after_button = QPushButton("添加后置操作  ▾"); after_button.setObjectName("EndpointAddAction")
+        after_menu = QMenu(after_button); after_menu.setObjectName("EndpointOperationMenu")
+        after_menu.aboutToShow.connect(lambda: after_menu.setFixedWidth(after_button.width()))
+        for action_name in ("断言", "提取变量", "数据库操作", "脚本", "脚本库", "等待时间", "从其它接口/用例/目录导入"):
+            action = after_menu.addAction(action_name); action.triggered.connect(lambda _=False, name=action_name: self._add_endpoint_operation("post", name))
+        after_button.setMenu(after_menu); after_layout.addWidget(after_button); after_layout.addStretch()
+        self.endpoint_post_actions_layout = after_layout
+        settings_page = QWidget(); settings_layout = QFormLayout(settings_page); settings_layout.setContentsMargins(10, 10, 10, 10); settings_layout.setVerticalSpacing(13)
+        for label in ("SSL 证书验证", "自动跟随重定向", "兼容带注释的 JSON"):
+            setting = QCheckBox("跟随项目设置"); settings_layout.addRow(label, setting)
+        url_encode = BelowPopupComboBox(); url_encode.addItem("跟随项目设置"); settings_layout.addRow("URL 自动编码", url_encode)
+        self.endpoint_request_tabs.addTab(parameter_page, "Params"); self.endpoint_request_tabs.addTab(body_container, "Body  1")
+        self.endpoint_request_tabs.addTab(headers_page, "Headers  2"); self.endpoint_request_tabs.addTab(cookies_page, "Cookies")
+        self.endpoint_request_tabs.addTab(auth_page, "Auth"); self.endpoint_request_tabs.addTab(before_page, "前置操作")
+        self.endpoint_request_tabs.addTab(after_page, "后置操作  3"); self.endpoint_request_tabs.addTab(settings_page, "设置")
+        self.endpoint_request_tabs.setCurrentIndex(1)
+
+        action_bar = QFrame(); action_bar.setObjectName("EndpointActionBar")
+        actions = QHBoxLayout(action_bar); actions.setContentsMargins(8, 6, 8, 6); actions.setSpacing(8)
+        login = QPushButton("验证登录"); login.setObjectName("EndpointActionButton"); login.clicked.connect(self.verify_environment_login)
+        delete = QPushButton("删除接口"); delete.setProperty("danger", True); delete.clicked.connect(self.delete_endpoint)
+        delete.setFixedHeight(30); login.setFixedHeight(30)
+        actions.addWidget(login); actions.addSpacing(8); actions.addWidget(delete); actions.addStretch()
+        response_panel = QFrame(); response_panel.setObjectName("EndpointResponsePanel")
+        response_layout = QVBoxLayout(response_panel); response_layout.setContentsMargins(10, 8, 10, 8); response_layout.setSpacing(6)
+        response_header = QHBoxLayout(); response_header.addWidget(QLabel("响应结果", objectName="EndpointResponseTitle")); response_header.addStretch()
+        self.endpoint_response_meta = QLabel("状态：—    耗时：—    大小：—"); self.endpoint_response_meta.setObjectName("EndpointResponseMeta"); response_header.addWidget(self.endpoint_response_meta)
+        response_tabs = QTabWidget(); response_tabs.setObjectName("EndpointResponseTabs")
+        response_body = QWidget(); response_body_layout = QVBoxLayout(response_body); response_body_layout.setContentsMargins(8, 5, 8, 6)
+        self.response = QTextEdit(); self.response.setReadOnly(True); self.response.setObjectName("EndpointEditor"); self.response.setPlaceholderText("发送请求后在此显示脱敏响应。")
+        response_body_layout.addWidget(self.response)
+        response_headers = QLabel("发送请求后显示响应 Header。"); response_headers.setObjectName("EndpointEmptyHint")
+        response_cookie = QLabel("发送请求后显示响应 Cookie。"); response_cookie.setObjectName("EndpointEmptyHint")
+        response_tabs.addTab(response_body, "美化"); response_tabs.addTab(response_headers, "原生")
+        response_tabs.addTab(response_cookie, "预览"); response_tabs.addTab(QLabel("可视化响应将在后续版本提供。", objectName="EndpointEmptyHint"), "Visualize")
+        response_tabs.addTab(QLabel("JSON 结构将在后续版本提供。", objectName="EndpointEmptyHint"), "JSON")
+        response_layout.addLayout(response_header); response_layout.addWidget(response_tabs, 1)
+        request_layout.addLayout(request_header); request_layout.addLayout(url_row); request_layout.addWidget(self.endpoint_request_tabs, 1)
+        request_layout.addWidget(action_bar); request_layout.addWidget(response_panel, 1)
+
+        definition = QFrame(); definition.setObjectName("EndpointDefinitionCard")
+        definition_layout = QVBoxLayout(definition); definition_layout.setContentsMargins(10, 10, 10, 10); definition_layout.setSpacing(6)
+        definition_layout.addWidget(QLabel("接口定义", objectName="EndpointPaneTitle"))
+        definition_tabs = QTabWidget(); definition_tabs.setObjectName("EndpointDefinitionTabs")
+        overview = QWidget(); overview_layout = QVBoxLayout(overview); overview_layout.setContentsMargins(10, 14, 10, 10); overview_layout.setSpacing(9)
+        overview_layout.addWidget(QLabel("基本信息", objectName="EndpointDefinitionSection"))
+        info = QFormLayout(); info.setHorizontalSpacing(10); info.setVerticalSpacing(5)
+        self.endpoint_definition_name = QLabel("—"); self.endpoint_definition_path = QLabel("—"); self.endpoint_definition_method = QLabel("—"); self.endpoint_definition_module = QLabel("—")
+        info.addRow("接口名称", self.endpoint_definition_name); info.addRow("接口路径", self.endpoint_definition_path); info.addRow("请求方法", self.endpoint_definition_method); info.addRow("接口分组", self.endpoint_definition_module)
+        overview_layout.addLayout(info); overview_layout.addWidget(QLabel("请求参数", objectName="EndpointDefinitionSection"))
+        self.endpoint_request_parameter_table = QTableWidget(0, 4); self.endpoint_request_parameter_table.setObjectName("EndpointDefinitionTable")
+        self.endpoint_request_parameter_table.setHorizontalHeaderLabels(["参数名", "类型", "必填", "说明"]); self.endpoint_request_parameter_table.verticalHeader().setVisible(False)
+        self.endpoint_request_parameter_table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.endpoint_request_parameter_table.horizontalHeader().setStretchLastSection(True)
+        overview_layout.addWidget(self.endpoint_request_parameter_table)
+        overview_layout.addWidget(QLabel("响应参数", objectName="EndpointDefinitionSection"))
+        self.endpoint_response_parameter_table = QTableWidget(0, 3); self.endpoint_response_parameter_table.setObjectName("EndpointDefinitionTable")
+        self.endpoint_response_parameter_table.setHorizontalHeaderLabels(["参数名", "类型", "说明"]); self.endpoint_response_parameter_table.verticalHeader().setVisible(False)
+        self.endpoint_response_parameter_table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.endpoint_response_parameter_table.horizontalHeader().setStretchLastSection(True)
+        overview_layout.addWidget(self.endpoint_response_parameter_table)
+        self.endpoint_detail = QTextEdit(); self.endpoint_detail.setObjectName("EndpointDetail"); self.endpoint_detail.setReadOnly(True); self.endpoint_detail.setPlaceholderText("选择接口后显示完整接口说明。")
+        definition_tabs.addTab(overview, "接口定义"); definition_tabs.addTab(self.endpoint_detail, "接口说明")
+        definition_layout.addWidget(definition_tabs, 1)
+
+        workbench.addWidget(groups); workbench.addWidget(request); workbench.addWidget(definition)
+        workbench.setStretchFactor(0, 2); workbench.setStretchFactor(1, 5); workbench.setStretchFactor(2, 3)
+        workbench.setSizes([220, 590, 310]); groups.setMinimumWidth(190); request.setMinimumWidth(500); definition.setMinimumWidth(285)
+        layout.addWidget(title); layout.addWidget(subtitle); layout.addLayout(filters); layout.addWidget(workbench, 1)
         self._finish_page(page, layout)
         return page
 
@@ -1648,7 +2786,11 @@ class MainWindow(QMainWindow):
         """Route A environment dashboard.  It keeps the real configuration fields
         while presenting the first-run check as a readable validation journey."""
         page = QScrollArea(); page.setObjectName("EnvironmentValidationScroll"); page.setWidgetResizable(True)
-        content = QWidget(); layout = QVBoxLayout(content); page.setWidget(content)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        page.setFocusPolicy(Qt.NoFocus)
+        content = QWidget(); content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        layout = QVBoxLayout(content); layout.setAlignment(Qt.AlignTop); page.setWidget(content)
         title = QLabel("环境校验"); title.setObjectName("PageTitle")
         subtitle = QLabel("校验测试环境、认证能力与接口资产可用性，确保后续流程测试可执行。")
         subtitle.setObjectName("PageSubtitle")
@@ -1656,12 +2798,14 @@ class MainWindow(QMainWindow):
         setup_card = QFrame(); setup_card.setObjectName("ValidationConfigCard")
         setup = QGridLayout(setup_card); setup.setContentsMargins(18, 16, 18, 16); setup.setHorizontalSpacing(16); setup.setVerticalSpacing(6)
         setup.addWidget(QLabel("项目"), 0, 0); setup.addWidget(QLabel("环境"), 0, 1); setup.addWidget(QLabel("基础地址（Base URL）"), 0, 2)
-        self.validation_project_selector = QComboBox()
+        self.validation_project_selector = BelowPopupComboBox()
         self.validation_project_selector.setObjectName("ValidationProjectSelector")
         self.validation_project_selector.currentIndexChanged.connect(self.select_validation_project)
-        self.env_selector = QComboBox(); self.env_selector.currentIndexChanged.connect(self.select_environment)
+        self.env_selector = BelowPopupComboBox(); self.env_selector.setEditable(True); self.env_selector.currentIndexChanged.connect(self.select_environment)
         self.base_url = QLineEdit(); self.base_url.setPlaceholderText("例如：http://192.168.31.117:3000")
         self.env_name = QLineEdit("测试环境"); self.env_name.setVisible(False)
+        self.env_selector.setCurrentText("测试环境")
+        self.env_selector.editTextChanged.connect(self.env_name.setText)
         self.headers = QTextEdit("{}"); self.headers.setVisible(False)
         self.variables = QTextEdit("{}"); self.variables.setVisible(False)
         self.auth_username = QLineEdit(); self.auth_username.setPlaceholderText("测试账号（认证需要时填写）")
@@ -1669,8 +2813,9 @@ class MainWindow(QMainWindow):
         self.environment_confirmed = BlueCheckBox("已确认目标为授权的测试/预发布环境")
         self.auth_status_hint = QLabel("将从已导入接口自动识别登录与 Token 规则")
         self.auth_status_hint.setObjectName("ValidationHint")
+        save_environment_button = QPushButton("保存测试环境"); save_environment_button.clicked.connect(self.save_environment)
         validate_button = QPushButton("▶  开始环境校验"); validate_button.setProperty("primary", True); validate_button.clicked.connect(self.run_environment_validation)
-        setup.addWidget(self.validation_project_selector, 1, 0); setup.addWidget(self.env_selector, 1, 1); setup.addWidget(self.base_url, 1, 2); setup.addWidget(validate_button, 1, 3)
+        setup.addWidget(self.validation_project_selector, 1, 0); setup.addWidget(self.env_selector, 1, 1); setup.addWidget(self.base_url, 1, 2); setup.addWidget(save_environment_button, 1, 3); setup.addWidget(validate_button, 1, 4)
         setup.setColumnStretch(0, 1); setup.setColumnStretch(1, 1); setup.setColumnStretch(2, 2)
 
         result_card = QFrame(); result_card.setObjectName("ValidationResultCard")
@@ -1775,37 +2920,34 @@ class MainWindow(QMainWindow):
         dashboard_row = QHBoxLayout(); dashboard_row.setSpacing(18)
         dashboard_row.addLayout(dashboard_left, 1)
         dashboard_row.addWidget(log_card, 0)
-        runtime_card = QFrame(); runtime_card.setObjectName("ProjectPanel")
-        runtime_layout = QVBoxLayout(runtime_card)
+        runtime_card = QFrame(); runtime_card.setObjectName("RuntimeSetupCard")
+        runtime_layout = QVBoxLayout(runtime_card); runtime_layout.setContentsMargins(18, 16, 18, 16); runtime_layout.setSpacing(12)
         runtime_title = QLabel("首次运行设置"); runtime_title.setObjectName("PanelTitle")
-        runtime_form = QFormLayout(); runtime_form.addRow("认证状态", self.auth_status_hint); runtime_form.addRow("测试账号", self.auth_username); runtime_form.addRow("测试密码", self.auth_password); runtime_form.addRow("执行授权", self.environment_confirmed)
+        runtime_subtitle = QLabel("首次保存一次账号和授权；凭据仅保存在本机安全存储，后续一键回归会自动复用。")
+        runtime_subtitle.setObjectName("ValidationHint")
+        runtime_form = QFormLayout(); runtime_form.setHorizontalSpacing(14); runtime_form.setVerticalSpacing(8)
+        runtime_form.addRow("认证状态", self.auth_status_hint); runtime_form.addRow("测试账号", self.auth_username); runtime_form.addRow("测试密码", self.auth_password); runtime_form.addRow("执行授权", self.environment_confirmed)
         save = QPushButton("保存并启用一键回归"); save.setProperty("primary", True); save.clicked.connect(self.save_environment)
-        runtime_layout.addWidget(runtime_title); runtime_layout.addLayout(runtime_form); runtime_layout.addWidget(save, alignment=Qt.AlignLeft)
+        runtime_left = QWidget(); runtime_left_layout = QVBoxLayout(runtime_left); runtime_left_layout.setContentsMargins(0, 0, 0, 0); runtime_left_layout.setSpacing(8)
+        runtime_actions = QHBoxLayout(); runtime_actions.addWidget(save); runtime_actions.addStretch()
+        runtime_left_layout.addLayout(runtime_form); runtime_left_layout.addLayout(runtime_actions)
+        runtime_help = QFrame(); runtime_help.setObjectName("RuntimeHelpCard")
+        runtime_help_layout = QVBoxLayout(runtime_help); runtime_help_layout.setContentsMargins(16, 14, 16, 14); runtime_help_layout.setSpacing(6)
+        runtime_help_title = QLabel("说明"); runtime_help_title.setObjectName("RuntimeHelpTitle")
+        runtime_help_text = QLabel(
+            "• 平台用登录接口自动获取并复用 Token。\n"
+            "• 凭据仅保存于当前电脑，不会写入 Manifest 或结果。\n"
+            "• 更换账号或环境后，重新保存即可更新本机配置。"
+        )
+        runtime_help_text.setObjectName("RuntimeHelpText"); runtime_help_text.setWordWrap(True)
+        runtime_help_layout.addWidget(runtime_help_title); runtime_help_layout.addWidget(runtime_help_text); runtime_help_layout.addStretch(1)
+        runtime_body = QHBoxLayout(); runtime_body.setSpacing(18); runtime_body.addWidget(runtime_left, 3); runtime_body.addWidget(runtime_help, 2)
+        runtime_layout.addWidget(runtime_title); runtime_layout.addWidget(runtime_subtitle); runtime_layout.addLayout(runtime_body)
 
-        debug_card = QFrame(); debug_card.setObjectName("ProjectPanel")
-        debug_layout = QVBoxLayout(debug_card)
-        debug_title = QLabel("单接口调试（可选）"); debug_title.setObjectName("PanelTitle")
-        self.debug_endpoint_label = QLabel("从“接口资产”中选择接口后点击“调试选中接口”，也可手工填写。")
-        self.debug_endpoint_label.setObjectName("ValidationHint")
-        self.method = QComboBox(); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
-        self.path = QLineEdit("/"); self.body = QTextEdit("{}"); self.body.setFixedHeight(90)
-        debug_form = QFormLayout(); debug_form.addRow("请求方法", self.method); debug_form.addRow("接口路径", self.path); debug_form.addRow("Body JSON", self.body)
-        self.response = QTextEdit(); self.response.setReadOnly(True); self.response.setMinimumHeight(130)
-        send = QPushButton("发送当前接口"); send.setProperty("primary", True); send.clicked.connect(self.send_request)
-        save_case = QPushButton("保存为测试用例"); save_case.clicked.connect(self.save_request_as_case)
-        actions = QHBoxLayout(); actions.addWidget(send); actions.addWidget(save_case); actions.addStretch()
-        debug_layout.addWidget(debug_title); debug_layout.addWidget(self.debug_endpoint_label); debug_layout.addLayout(debug_form); debug_layout.addLayout(actions); debug_layout.addWidget(self.response)
-
-        # Keep the validation dashboard visually identical to the product flow:
-        # configuration is represented by the top row and the result/log area.
-        # Extra credentials and manual debugging remain available to the runtime
-        # methods, but are intentionally not placed below the dashboard.
-        runtime_card.setVisible(False); debug_card.setVisible(False)
+        runtime_card.setVisible(True)
         layout.addWidget(title); layout.addWidget(subtitle); layout.addLayout(dashboard_row)
-        # Keep the hidden operational widgets parented by this page.  They are
-        # used by saved-environment and endpoint-debug actions, but must not
-        # consume any dashboard space or be garbage-collected by Qt.
-        layout.addWidget(runtime_card); layout.addWidget(debug_card)
+        runtime_row = QHBoxLayout(); runtime_row.addWidget(runtime_card, 1)
+        layout.addLayout(runtime_row)
         self._finish_page(content, layout)
         return page
 
@@ -1846,7 +2988,7 @@ class MainWindow(QMainWindow):
         environment_form.setHorizontalSpacing(14)
         environment_form.setVerticalSpacing(10)
         environment_form.setColumnStretch(1, 1)
-        self.env_selector = QComboBox(); self.env_selector.currentIndexChanged.connect(self.select_environment)
+        self.env_selector = BelowPopupComboBox(); self.env_selector.currentIndexChanged.connect(self.select_environment)
         self.env_name = QLineEdit("测试环境")
         self.base_url = QLineEdit()
         self.base_url.setPlaceholderText("例如：http://192.168.31.117:3000")
@@ -1898,26 +3040,28 @@ class MainWindow(QMainWindow):
         self.debug_endpoint_label = QLabel("请在“接口资产”中选择一个接口后点击“调试选中接口”，也可手工填写。")
         self.debug_endpoint_label.setObjectName("ContextBanner")
         request_form = QFormLayout()
-        self.method = QComboBox(); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
-        self.path = QLineEdit("/")
-        self.body = QTextEdit("{}"); self.body.setFixedHeight(112)
-        request_form.addRow("请求方法", self.method); request_form.addRow("接口路径", self.path); request_form.addRow("Body JSON", self.body)
+        self.validation_debug_method = BelowPopupComboBox(); self.validation_debug_method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+        self.validation_debug_path = QLineEdit("/")
+        self.validation_debug_body = QTextEdit("{}"); self.validation_debug_body.setFixedHeight(112)
+        request_form.addRow("请求方法", self.validation_debug_method); request_form.addRow("接口路径", self.validation_debug_path); request_form.addRow("Body JSON", self.validation_debug_body)
         buttons = QHBoxLayout()
         send = QPushButton("发送当前接口"); send.clicked.connect(self.send_request)
         save_as_case = QPushButton("保存为测试用例"); save_as_case.clicked.connect(self.save_request_as_case)
         buttons.addWidget(send); buttons.addWidget(save_as_case); buttons.addStretch()
-        self.response = QTextEdit(); self.response.setReadOnly(True)
-        self.response.setMinimumHeight(190)
-        self.response.setMaximumHeight(260)
+        self.validation_debug_response = QTextEdit(); self.validation_debug_response.setReadOnly(True)
+        self.validation_debug_response.setMinimumHeight(190)
+        self.validation_debug_response.setMaximumHeight(260)
         request_layout.addWidget(request_title); request_layout.addWidget(self.debug_endpoint_label); request_layout.addLayout(request_form); request_layout.addLayout(buttons)
         # The running configuration itself identifies the project.  Retain the
         # guidance as a short subtitle rather than two large banners.
         layout.addWidget(title); layout.addWidget(subtitle); layout.addWidget(validation_track)
+        request_card.setVisible(False)
+        validation_response_title = QLabel("响应（敏感字段已脱敏）"); validation_response_title.setVisible(False)
+        self.validation_debug_response.setVisible(False)
         layout.addWidget(environment_card); layout.addWidget(request_card)
-        layout.addWidget(QLabel("响应（敏感字段已脱敏）")); layout.addWidget(self.response, 1)
+        layout.addWidget(validation_response_title); layout.addWidget(self.validation_debug_response, 1)
         save.setProperty("primary", True)
         send.setProperty("primary", True)
-        layout.addStretch(1)
         self._finish_page(content, layout)
         return page
 
@@ -2294,10 +3438,13 @@ class MainWindow(QMainWindow):
                 self.headers.setPlainText("{}")
                 self.variables.setPlainText("{}")
                 self.environment_confirmed.setChecked(False)
+        self._refresh_endpoint_debug_environments()
         if hasattr(self, "case_table"):
             self.refresh_cases()
         if hasattr(self, "report_table"):
             self.refresh_reports()
+        if hasattr(self, "runner_run_table"):
+            self.refresh_external_runner_runs()
         if hasattr(self, "workflow_selector"):
             self.refresh_workflows()
 
@@ -2579,7 +3726,7 @@ class MainWindow(QMainWindow):
         name = self.projects.currentText() if self.current_project_id else "未选择"
         endpoint_count = len(self.db.list_endpoints(self.current_project_id)) if self.current_project_id else 0
         context = f"当前项目：{name}  ·  {endpoint_count} 个接口"
-        for attribute in ("request_project_label", "case_project_label", "report_project_label", "workflow_project_label", "ai_dialogue_project_label"):
+        for attribute in ("request_project_label", "case_project_label", "report_project_label", "workflow_project_label", "ai_dialogue_project_label", "runner_project_label"):
             label = getattr(self, attribute, None)
             if label:
                 label.setText(context)
@@ -3495,9 +4642,12 @@ class MainWindow(QMainWindow):
             ]
             run_id = self.db.create_workflow_run(self.current_project_id, int(workflow_id), connection_id)
             trace = TraceCollector()
+            execution_definition = {**definition, "run_id": f"workflow_{run_id}"}
+            ledger_path = self.db.path.parent / "reports" / "workflow-artifacts" / str(run_id) / "resource_ledger.json"
             results, summary = run_workflow(
-                definition, self.base_url.text(), json.loads(self.headers.toPlainText() or "{}"),
+                execution_definition, self.base_url.text(), json.loads(self.headers.toPlainText() or "{}"),
                 variables=variables, database=database, fixtures=fixtures, stop_event=getattr(self, "_stop_event", None), trace=trace,
+                ledger_path=ledger_path,
             )
             for index, result in enumerate(results, 1):
                 self.db.save_workflow_step_result(run_id, None, int(result.get("step_order", index)), result.get("status", "error"), result)
@@ -3811,18 +4961,91 @@ class MainWindow(QMainWindow):
         if module is not None:
             rows = [row for row in rows if row["module"] == module]
         rows = [r for r in rows if query in " ".join(str(r[k]) for k in ("method", "path", "module", "summary")).lower()]
+        # A project can contain both discovered source routes and an imported
+        # OpenAPI document.  Show one endpoint per method/path and prefer the
+        # document definition, because it carries the request schema/examples.
+        # The original sources remain stored for comparison and filtering.
+        if source_id is None:
+            preferred: dict[tuple[str, str], dict] = {}
+            for candidate in rows:
+                kind = str(candidate.get("source_kind") or "")
+                priority = 3 if kind == "manual" else 1 if kind == "source_code" else 2
+                key = (str(candidate["method"]), str(candidate["path"]))
+                existing = preferred.get(key)
+                existing_kind = str(existing.get("source_kind") or "") if existing else ""
+                existing_priority = 3 if existing_kind == "manual" else 1 if existing_kind == "source_code" else 2
+                if existing is None or (priority, int(candidate["source_id"])) >= (existing_priority, int(existing["source_id"])):
+                    preferred[key] = candidate
+            rows = sorted(preferred.values(), key=lambda item: (str(item["module"]).lower(), str(item["path"]), str(item["method"])))
         table = self.endpoint_table
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
         try:
             table.setRowCount(len(rows)); self._endpoint_rows = rows
             for i, row in enumerate(rows):
-                for col, key in enumerate(("method", "path", "module", "summary")):
-                    table.setItem(i, col, QTableWidgetItem(str(row[key])))
+                values = (row["method"], row.get("summary") or row["path"], row["path"])
+                for col, value in enumerate(values):
+                    table.setItem(i, col, QTableWidgetItem(str(value)))
         finally:
             table.blockSignals(False)
             table.setUpdatesEnabled(True)
+        self.refresh_endpoint_tree(rows)
         self._refresh_auth_status_hint()
+
+    def refresh_endpoint_tree(self, rows: list[dict]) -> None:
+        """Build the Apifox-style module navigator from the already filtered rows."""
+        if not hasattr(self, "endpoint_tree"):
+            return
+        tree = self.endpoint_tree
+        tree.blockSignals(True); tree.clear()
+        try:
+            workspace_root = QTreeWidgetItem(tree, ["默认模块"])
+            workspace_root.setIcon(0, self.style().standardIcon(QStyle.SP_DirHomeIcon))
+            workspace_root.setData(0, Qt.UserRole, {"kind": "all"})
+            root = QTreeWidgetItem(workspace_root, [f"接口  ({len(rows)})"])
+            root.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+            root.setData(0, Qt.UserRole, {"kind": "all"})
+            groups: dict[str, list[dict]] = {}
+            for row in rows:
+                groups.setdefault(str(row.get("module") or "未分组"), []).append(row)
+            for module, module_rows in sorted(groups.items(), key=lambda item: item[0].lower()):
+                module_item = QTreeWidgetItem(root, [f"{module}  ({len(module_rows)})"])
+                module_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                module_item.setData(0, Qt.UserRole, {"kind": "module", "module": module})
+                for row in module_rows:
+                    method = str(row["method"]).upper()
+                    endpoint_item = QTreeWidgetItem(module_item, [""])
+                    endpoint_item.setSizeHint(0, QSize(0, 30))
+                    endpoint_item.setData(0, Qt.UserRole, {"kind": "endpoint", "id": row["id"]})
+                    endpoint_line = QWidget(tree); endpoint_line.setObjectName("EndpointTreeLeaf")
+                    endpoint_line.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                    endpoint_layout = QHBoxLayout(endpoint_line); endpoint_layout.setContentsMargins(0, 0, 0, 0); endpoint_layout.setSpacing(6)
+                    method_label = QLabel(method); method_label.setObjectName("EndpointTreeMethod")
+                    method_label.setStyleSheet(f"color: {HttpMethodItemDelegate.COLORS.get(method, '#1677e8')};")
+                    name_label = QLabel(str(row.get("summary") or row["path"])); name_label.setObjectName("EndpointTreeName")
+                    endpoint_layout.addWidget(method_label); endpoint_layout.addWidget(name_label); endpoint_layout.addStretch()
+                    tree.setItemWidget(endpoint_item, 0, endpoint_line)
+            workspace_root.setExpanded(True); root.setExpanded(True)
+            for index in range(root.childCount()):
+                root.child(index).setExpanded(True)
+        finally:
+            tree.blockSignals(False)
+
+    def select_endpoint_tree_item(self, item: QTreeWidgetItem, _column: int) -> None:
+        data = item.data(0, Qt.UserRole) or {}
+        if data.get("kind") == "all":
+            self.module_filter.setCurrentIndex(0)
+            return
+        if data.get("kind") == "module":
+            index = self.module_filter.findData(data["module"])
+            self.module_filter.setCurrentIndex(max(0, index))
+            return
+        if data.get("kind") == "endpoint":
+            endpoint_id = data.get("id")
+            for row_index, row in enumerate(getattr(self, "_endpoint_rows", [])):
+                if row["id"] == endpoint_id:
+                    self.endpoint_table.selectRow(row_index)
+                    break
 
     def _schedule_endpoint_refresh(self):
         if hasattr(self, "_endpoint_search_timer"):
@@ -3873,39 +5096,443 @@ class MainWindow(QMainWindow):
             self.db.delete_endpoint(self._endpoint_rows[row]["id"])
             self.refresh_projects(); self.refresh_endpoints()
 
+    def _add_endpoint_operation(self, stage: str, name: str) -> None:
+        """Add a visible, removable pre/post action card after a menu choice."""
+        layout = self.endpoint_pre_actions_layout if stage == "pre" else self.endpoint_post_actions_layout
+        card = QFrame(); card.setObjectName("EndpointOperationCard")
+        card_layout = QHBoxLayout(card); card_layout.setContentsMargins(10, 7, 8, 7)
+        card_layout.addWidget(QLabel(name, objectName="EndpointOperationName"))
+        detail = QLabel("待配置"); detail.setObjectName("EndpointOperationDetail")
+        remove = QToolButton(); remove.setText("×"); remove.setToolTip("移除此操作"); remove.clicked.connect(card.deleteLater)
+        card_layout.addStretch(); card_layout.addWidget(detail); card_layout.addWidget(remove)
+        layout.insertWidget(max(1, layout.count() - 1), card)
+
+    @staticmethod
+    def _endpoint_body_example(request_body: dict) -> object:
+        """Read examples from both normalized and OpenAPI request-body layouts."""
+        if not isinstance(request_body, dict):
+            return {}
+        example = request_body.get("example")
+        if isinstance(example, dict) and "value" in example:
+            example = example["value"]
+        if example is not None:
+            return example
+        examples = request_body.get("examples")
+        if isinstance(examples, dict) and examples:
+            first = next(iter(examples.values()))
+            return first.get("value", first) if isinstance(first, dict) else first
+        content = request_body.get("content") or {}
+        if not isinstance(content, dict):
+            return {}
+        media = content.get("application/json") or next((item for item in content.values() if isinstance(item, dict)), {})
+        if not isinstance(media, dict):
+            return {}
+        example = media.get("example")
+        if isinstance(example, dict) and "value" in example:
+            return example["value"]
+        if example is not None:
+            return example
+        examples = media.get("examples")
+        if isinstance(examples, dict) and examples:
+            first = next(iter(examples.values()))
+            return first.get("value", first) if isinstance(first, dict) else first
+        schema = media.get("schema") or {}
+        return MainWindow._schema_default_example(schema)
+
+    @staticmethod
+    def _schema_default_example(schema: object) -> object:
+        """Create an editable request skeleton when an API only supplies a schema."""
+        if not isinstance(schema, dict):
+            return {}
+        for key in ("example", "default"):
+            if key in schema and schema[key] is not None:
+                return schema[key]
+        enum = schema.get("enum")
+        if isinstance(enum, list) and enum:
+            return enum[0]
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            return {str(name): MainWindow._schema_default_example(value) for name, value in properties.items()}
+        schema_type = str(schema.get("type") or "")
+        if schema_type == "array":
+            return []
+        if schema_type in {"integer", "number"}:
+            return 0
+        if schema_type == "boolean":
+            return False
+        if schema_type == "object":
+            return {}
+        return ""
+
+    @staticmethod
+    def _endpoint_body_field_metadata(request_body: dict, body_type: str) -> dict[str, dict[str, str]]:
+        """Extract property type/description for form-style request bodies."""
+        if not isinstance(request_body, dict):
+            return {}
+        content = request_body.get("content") or {}
+        if not isinstance(content, dict):
+            return {}
+        content_type = {
+            "form-data": "multipart/form-data",
+            "x-www-form-urlencoded": "application/x-www-form-urlencoded",
+        }.get(body_type, "")
+        media = content.get(content_type) if content_type else None
+        if not isinstance(media, dict):
+            media = next((item for item in content.values() if isinstance(item, dict)), {})
+        schema = media.get("schema") or {} if isinstance(media, dict) else {}
+        properties = schema.get("properties") or {} if isinstance(schema, dict) else {}
+        if not isinstance(properties, dict):
+            return {}
+        return {
+            str(name): {
+                "type": str(value.get("type") or "string"),
+                "description": str(value.get("description") or ""),
+            }
+            for name, value in properties.items() if isinstance(value, dict)
+        }
+
+    @staticmethod
+    def _fill_endpoint_editor_table(table: QTableWidget, rows: list[dict]) -> None:
+        table.blockSignals(True)
+        try:
+            table.setRowCount(max(1, len(rows)))
+            for row_index in range(max(1, len(rows))):
+                item = rows[row_index] if row_index < len(rows) else {}
+                values = (
+                    item.get("name", "添加参数" if not rows else ""),
+                    item.get("value", ""),
+                    item.get("type", "string"),
+                    item.get("description", ""),
+                )
+                for column, value in enumerate(values):
+                    cell = QTableWidgetItem(str(value))
+                    if column == 0 and item.get("location"):
+                        cell.setData(Qt.UserRole, item["location"])
+                    table.setItem(row_index, column, cell)
+        finally:
+            table.blockSignals(False)
+
+    def _populate_endpoint_request_editor(self, parameters: list[dict], request_body: dict, security: list[dict]) -> None:
+        if not hasattr(self, "endpoint_query_editor"):
+            return
+        normalized = []
+        for item in parameters:
+            if not isinstance(item, dict):
+                continue
+            location = str(item.get("location") or item.get("in") or "query").lower()
+            schema = item.get("schema") or {}
+            example = item.get("example")
+            if example is None and isinstance(schema, dict):
+                example = schema.get("example", schema.get("default", ""))
+            normalized.append({
+                "name": item.get("name", ""), "value": example,
+                "type": schema.get("type", item.get("type", "string")) if isinstance(schema, dict) else item.get("type", "string"),
+                "description": item.get("description", ""), "location": location,
+            })
+        self.endpoint_query_editor.set_parameters([item for item in normalized if item["location"] == "query"])
+        self._sync_endpoint_url_query()
+        header_parameters = [item for item in normalized if item["location"] == "header"]
+        if security and not any(item.get("name", "").lower() == "authorization" for item in header_parameters):
+            header_parameters.append({"name": "Authorization", "value": "由 Auth 配置管理", "source": "Auth"})
+        if hasattr(self, "endpoint_headers_editor"):
+            self.endpoint_headers_editor.set_parameters(header_parameters)
+        if hasattr(self, "endpoint_cookies_editor"):
+            self.endpoint_cookies_editor.set_parameters([item for item in normalized if item["location"] == "cookie"])
+        if hasattr(self, "endpoint_auth_mode"):
+            self.endpoint_auth_mode.setCurrentText("Bearer Token" if security else "无需鉴权")
+        body_example = self._endpoint_body_example(request_body)
+        self._set_endpoint_body_type_from_definition(request_body)
+        body_metadata = self._endpoint_body_field_metadata(request_body, self._endpoint_body_type)
+        if self._endpoint_body_type == "form-data" and isinstance(body_example, dict):
+            names = list(dict.fromkeys([*body_metadata, *body_example]))
+            self.endpoint_body_form_editor.set_parameters([
+                {"name": key, "value": body_example.get(key, ""), **body_metadata.get(key, {})} for key in names
+            ])
+            self._update_endpoint_body_editor_height()
+        elif self._endpoint_body_type == "x-www-form-urlencoded" and isinstance(body_example, dict):
+            names = list(dict.fromkeys([*body_metadata, *body_example]))
+            self.endpoint_body_urlencoded_editor.set_parameters([
+                {"name": key, "value": body_example.get(key, ""), **body_metadata.get(key, {})} for key in names
+            ])
+            self._update_endpoint_body_editor_height()
+        elif self._endpoint_body_type in {"raw", "xml", "text", "graphql", "msgpack"} and isinstance(body_example, str):
+            self.body.setPlainText(body_example)
+        else:
+            self.body.setPlainText(json.dumps(body_example if body_example is not None else {}, ensure_ascii=False, indent=2))
+
+    def _set_endpoint_body_type(self, body_type: str) -> None:
+        self._endpoint_body_type = body_type
+        if not hasattr(self, "body"):
+            return
+        if hasattr(self, "endpoint_body_stack"):
+            page = getattr(self, "_endpoint_body_pages", {}).get(body_type)
+            if page:
+                self.endpoint_body_stack.setCurrentWidget(page)
+            compact_heights = {
+                "none": 52, "binary": 58,
+                "raw": 220, "json": 220, "xml": 220, "text": 220, "graphql": 220, "msgpack": 220,
+            }
+            if body_type in {"form-data", "x-www-form-urlencoded"}:
+                self._update_endpoint_body_editor_height()
+            else:
+                self.endpoint_body_stack.setFixedHeight(compact_heights.get(body_type, 220))
+        text_placeholders = {
+            "json": "输入 JSON 请求体", "xml": "输入 XML 请求体", "text": "输入纯文本请求体",
+            "raw": "输入原始文本请求体", "graphql": "输入 GraphQL 请求体", "msgpack": "输入 msgpack 内容",
+        }
+        self.body.setReadOnly(False); self.body.setEnabled(body_type not in {"none", "binary"})
+        self.body.setPlaceholderText(text_placeholders.get(body_type, "根据接口定义填写请求 Body"))
+        if hasattr(self, "endpoint_body_format_button"):
+            self.endpoint_body_format_button.setVisible(body_type == "json")
+
+    def _update_endpoint_body_editor_height(self) -> None:
+        """Keep form bodies as compact as the Params key/value editor."""
+        if not hasattr(self, "endpoint_body_stack"):
+            return
+        body_type = getattr(self, "_endpoint_body_type", "json")
+        editors = {
+            "form-data": getattr(self, "endpoint_body_form_editor", None),
+            "x-www-form-urlencoded": getattr(self, "endpoint_body_urlencoded_editor", None),
+        }
+        editor = editors.get(body_type)
+        if editor is None:
+            return
+        # A single blank row remains a normal compact form.  Each automatic
+        # extra row adds just its own row height and spacing.
+        row_count = len(getattr(editor, "_rows", ()))
+        height = max(78, 40 + row_count * 38)
+        self.endpoint_body_stack.setFixedHeight(min(height, 230))
+
+    def _choose_endpoint_binary_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择 Binary 请求文件")
+        if path and hasattr(self, "endpoint_binary_path"):
+            self.endpoint_binary_path.setText(path)
+
+    def _set_endpoint_body_type_from_definition(self, request_body: dict) -> None:
+        content = request_body.get("content") if isinstance(request_body, dict) else {}
+        content = content if isinstance(content, dict) else {}
+        content_types = {str(content_type).lower() for content_type in content}
+        if "application/json" in content_types or any("+json" in item for item in content_types):
+            body_type = "json"
+        elif "multipart/form-data" in content_types:
+            body_type = "form-data"
+        elif "application/x-www-form-urlencoded" in content_types:
+            body_type = "x-www-form-urlencoded"
+        elif any("xml" in item for item in content_types):
+            body_type = "xml"
+        elif any("graphql" in item for item in content_types):
+            body_type = "graphql"
+        elif any("msgpack" in item for item in content_types):
+            body_type = "msgpack"
+        elif any("octet-stream" in item for item in content_types):
+            body_type = "binary"
+        elif any(item.startswith("text/") for item in content_types):
+            body_type = "text"
+        elif content_types:
+            body_type = "raw"
+        else:
+            body_type = "none"
+        if hasattr(self, "endpoint_body_type_buttons"):
+            button = self.endpoint_body_type_buttons.get(body_type)
+            if button:
+                button.setChecked(True)
+        self._set_endpoint_body_type(body_type)
+
+    def _format_endpoint_body(self) -> None:
+        if not hasattr(self, "body") or self._endpoint_body_type != "json":
+            return
+        try:
+            value = json.loads(self.body.toPlainText() or "{}")
+        except json.JSONDecodeError as exc:
+            QMessageBox.warning(self, "无法格式化", f"请求 Body 不是有效 JSON：{exc.msg}")
+            return
+        self.body.setPlainText(json.dumps(value, ensure_ascii=False, indent=2))
+
+    def _endpoint_body_payload(self) -> tuple[object | None, str]:
+        """Return the selected Body safely for both debug sending and saved cases."""
+        body_type = getattr(self, "_endpoint_body_type", "json")
+        if self.method.currentText() in {"GET", "HEAD"} or body_type == "none":
+            return None, "application/json"
+        if body_type == "form-data":
+            return dict(self.endpoint_body_form_editor.parameters()), "multipart/form-data"
+        if body_type == "x-www-form-urlencoded":
+            return dict(self.endpoint_body_urlencoded_editor.parameters()), "application/x-www-form-urlencoded"
+        if body_type == "binary":
+            path = Path(self.endpoint_binary_path.text().strip())
+            if not path.is_file():
+                raise ValueError("请选择存在的 Binary 请求文件")
+            return path.read_bytes(), "application/octet-stream"
+        text = self.body.toPlainText().strip()
+        if body_type in {"raw", "text", "xml", "graphql", "msgpack"}:
+            content_type = {
+                "raw": "text/plain", "text": "text/plain", "xml": "application/xml",
+                "graphql": "application/graphql", "msgpack": "application/msgpack",
+            }[body_type]
+            return text, content_type
+        try:
+            payload = json.loads(text or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"请求 Body 不是有效 JSON：{exc.msg}") from exc
+        content_types = {
+            "json": "application/json",
+        }
+        return payload, content_types.get(body_type, "application/json")
+
+    def _sync_endpoint_url_query(self) -> None:
+        """Reflect the compact Query editor in the read-only request URL immediately."""
+        if not hasattr(self, "endpoint_url") or not hasattr(self, "endpoint_query_editor"):
+            return
+        base_url = self.base_url.text().strip() if hasattr(self, "base_url") else ""
+        path = self.path.text().strip() if hasattr(self, "path") else ""
+        if not base_url:
+            environments = self.db.list_environments(self.current_project_id) if self.current_project_id else []
+            base_url = str(environments[0].get("base_url") or "") if environments else ""
+        url = f"{base_url.rstrip('/')}{path}" if base_url else path
+        query = self.endpoint_query_editor.parameters()
+        self.endpoint_url.setText(f"{url}?{urlencode(query)}" if query else url)
+
+    def _endpoint_request_overrides(self) -> tuple[str, dict, dict]:
+        """Build path, query values and headers from the compact debug editors."""
+        request_path = self.path.text()
+        query: dict[str, object] = {}
+        extra_headers: dict[str, str] = {}
+        if hasattr(self, "endpoint_query_editor"):
+            query.update({name: value for name, value in self.endpoint_query_editor.parameters()})
+        if hasattr(self, "endpoint_headers_editor"):
+            for item in self.endpoint_headers_editor.entries():
+                if item["enabled"] and item.get("source") != "Auth":
+                    extra_headers[item["name"]] = item["value"]
+        if hasattr(self, "endpoint_cookies_editor"):
+            cookies = [
+                f"{item['name']}={item['value']}" for item in self.endpoint_cookies_editor.entries()
+                if item["enabled"]
+            ]
+            if cookies:
+                extra_headers["Cookie"] = "; ".join(cookies)
+        return request_path, query, extra_headers
+
+    @staticmethod
+    def _inline_query_parameters(path: str) -> tuple[str, list[dict]]:
+        """Recover query fields from imported URLs that embed `?key=value`."""
+        parsed = urlparse(path)
+        if not parsed.query:
+            return path, []
+        route = parsed.path or "/"
+        return route, [
+            {"name": name, "location": "query", "schema": {"type": "string"}, "example": value}
+            for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+
     def show_endpoint(self):
         row = self.endpoint_table.currentRow()
         if row < 0 or row >= len(getattr(self, "_endpoint_rows", [])):
             return
-        data = json.loads(self._endpoint_rows[row]["definition_json"])
-        self.endpoint_detail.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
-        self.method.setCurrentText(data["method"]); self.path.setText(data["path"])
+        stored = self._endpoint_rows[row]
+        data = json.loads(stored["definition_json"])
+        parameters = [item for item in data.get("parameters") or [] if isinstance(item, dict)]
+        path = str(data.get("path") or stored.get("path") or "/")
+        path, inline_query_parameters = self._inline_query_parameters(path)
+        known_query_names = {
+            str(item.get("name") or "") for item in parameters
+            if str(item.get("location") or item.get("in") or "query").lower() == "query"
+        }
+        parameters.extend(item for item in inline_query_parameters if item["name"] not in known_query_names)
+        request_body = data.get("request_body") or {}
+        responses = data.get("responses") or {}
+        security = data.get("security") or []
+        parameter_lines = [
+            f"- {item.get('name', '未命名')}  ·  {item.get('in', 'query')}  ·  {'必填' if item.get('required') else '可选'}"
+            for item in parameters if isinstance(item, dict)
+        ]
+        request_example = request_body.get("example") if isinstance(request_body, dict) else None
+        if request_example is None and isinstance(request_body, dict):
+            request_example = request_body.get("examples")
+        detail = [
+            f"{data.get('method', stored['method'])}  {data.get('path', stored['path'])}",
+            "",
+            f"名称：{data.get('summary') or stored.get('summary') or '未命名接口'}",
+            f"模块：{data.get('module') or stored.get('module') or '未分组'}",
+            f"认证：{'需要' if security else '未声明'}",
+            "",
+            "请求参数：",
+            *(parameter_lines or ["- 未声明参数"]),
+            "",
+            "请求体示例：",
+            json.dumps(request_example, ensure_ascii=False, indent=2) if request_example is not None else "未提供示例",
+            "",
+            "响应定义：",
+            json.dumps(responses, ensure_ascii=False, indent=2) if responses else "未提供响应 Schema",
+        ]
+        method = str(data.get("method") or stored.get("method") or "GET").upper()
+        self.endpoint_detail.setPlainText("\n".join(detail))
+        self.method.setCurrentText(method)
+        method_color = {
+            "GET": "#16a34a", "POST": "#f97316", "PUT": "#1677e8", "PATCH": "#8b5cf6",
+            "DELETE": "#ef4444", "HEAD": "#06b6d4", "OPTIONS": "#d4a000",
+        }.get(method, "#1677e8")
+        palette = self.method.palette()
+        palette.setColor(QPalette.ButtonText, QColor(method_color))
+        palette.setColor(QPalette.Text, QColor(method_color))
+        self.method.setPalette(palette)
+        self.path.setText(path)
+        environments = self.db.list_environments(self.current_project_id) if self.current_project_id else []
+        base_url = str(environments[0].get("base_url") or "") if environments else ""
+        full_url = f"{base_url.rstrip('/')}{path}" if base_url else path
+        self.endpoint_url.setText(full_url)
+        request_example = request_body.get("example") if isinstance(request_body, dict) else None
+        if request_example is None and isinstance(request_body, dict):
+            request_example = request_body.get("examples")
+        if not isinstance(request_example, (dict, list)):
+            request_example = {}
+        self.body.setPlainText(json.dumps(request_example, ensure_ascii=False, indent=2))
+        self._populate_endpoint_request_editor(
+            [item for item in parameters if isinstance(item, dict)], request_body, security
+        )
+        summary = str(data.get("summary") or stored.get("summary") or path)
+        self.endpoint_active_label.setText(f"{method}  {path}")
+        self.endpoint_active_label.setToolTip(summary)
+        if hasattr(self, "endpoint_definition_name"):
+            self.endpoint_definition_name.setText(summary)
+            self.endpoint_definition_path.setText(path)
+            self.endpoint_definition_method.setText(method)
+            self.endpoint_definition_module.setText(str(data.get("module") or stored.get("module") or "未分组"))
+            request_table = self.endpoint_request_parameter_table
+            request_parameters = [item for item in parameters if isinstance(item, dict)]
+            request_table.clearSpans()
+            request_table.setRowCount(len(request_parameters) or 1)
+            if not request_parameters:
+                request_table.setItem(0, 0, QTableWidgetItem("暂无请求参数"))
+                request_table.setSpan(0, 0, 1, 4)
+            for index, item in enumerate(request_parameters):
+                values = (
+                    item.get("name", "—"), item.get("schema", {}).get("type", "string") if isinstance(item.get("schema"), dict) else item.get("type", "string"),
+                    "是" if item.get("required") else "否", item.get("description", ""),
+                )
+                for column, value in enumerate(values):
+                    request_table.setItem(index, column, QTableWidgetItem(str(value)))
+            response_table = self.endpoint_response_parameter_table
+            response_items = list(responses.items()) if isinstance(responses, dict) else []
+            response_table.clearSpans()
+            response_table.setRowCount(len(response_items) or 1)
+            if not response_items:
+                response_table.setItem(0, 0, QTableWidgetItem("暂无响应参数"))
+                response_table.setSpan(0, 0, 1, 3)
+            for index, (code, response_definition) in enumerate(response_items):
+                description = response_definition.get("description", "") if isinstance(response_definition, dict) else ""
+                response_table.setItem(index, 0, QTableWidgetItem(str(code)))
+                response_table.setItem(index, 1, QTableWidgetItem("object"))
+                response_table.setItem(index, 2, QTableWidgetItem(str(description)))
 
     def debug_selected_endpoint(self):
-        """Open an endpoint in the per-project debug surface with saved settings."""
+        """Open the selected endpoint in the interface-asset debugging tab."""
         row = self.endpoint_table.currentRow()
         if row < 0 or row >= len(getattr(self, "_endpoint_rows", [])):
             QMessageBox.information(self, "选择接口", "请先在接口列表中选择一个接口。")
             return
-        stored = self._endpoint_rows[row]
-        try:
-            definition = json.loads(stored["definition_json"])
-        except (TypeError, ValueError) as exc:
-            QMessageBox.warning(self, "接口数据无效", str(exc))
-            return
-        self.method.setCurrentText(str(definition.get("method") or stored["method"]))
-        self.path.setText(str(definition.get("path") or stored["path"]))
-        request_body = definition.get("request_body")
-        body = {}
-        if isinstance(request_body, dict):
-            body = request_body.get("example") or request_body.get("examples") or {}
-            if not isinstance(body, (dict, list)):
-                body = {}
-        self.body.setPlainText(json.dumps(body, ensure_ascii=False, indent=2))
-        self.debug_endpoint_label.setText(
-            f"正在调试：{self.method.currentText()} {self.path.text()} · {stored.get('summary') or stored.get('module') or '接口资产'}。"
-        )
-        self.go_to_page(2)
+        # Reuse the normal selection pipeline so debug always has the definition's
+        # query/header/cookie defaults and the URL remains synchronised.
+        self.show_endpoint()
+        self.endpoint_request_tabs.setCurrentIndex(1)
 
     def select_environment(self):
         if not self.current_project_id or self.env_selector.currentIndex() < 0:
@@ -4031,28 +5658,33 @@ class MainWindow(QMainWindow):
                 },
             }
             reachable = result.status_code < 500
+            _auth_required, login = self._detected_project_auth()
+            login_known = login is not None
+            login_path = str(login.get("path")) if login_known else ""
             status_text = "成功" if reachable else f"异常（HTTP {result.status_code}）"
             step_details = (
                 base_url,
-                "已识别登录接口" if "/api/auth/login" in {x["path"] for x in self.db.list_endpoints(self.current_project_id)} else "未发现固定登录接口",
-                "回归时自动获取/复用" if reachable else "等待服务恢复",
+                f"已识别登录接口 {login_path}" if login_known else "未发现固定登录接口",
+                "回归时自动获取/复用" if login_known and reachable else "待识别登录规则或服务恢复",
                 f"已载入 {endpoint_count} 个接口",
-                "全部校验通过" if reachable else "部分校验异常",
+                "环境与认证规则校验通过" if reachable and login_known else "环境或认证规则待确认",
             )
+            step_levels = ("success" if reachable else "warning", "success" if login_known else "warning",
+                           "success" if login_known and reachable else "warning", "success",
+                           "success" if reachable and login_known else "warning")
             for index, (detail, status, status_icon) in enumerate(self.validation_steps):
                 detail.setText(step_details[index])
-                level = "success" if reachable or index in {1, 2, 3} else "warning"
+                level = step_levels[index]
                 status.setText("成功" if level == "success" else "异常")
                 self._set_validation_icon(status_icon, level)
                 self._set_validation_label_style(status, level, "ValidationStep")
-            login_known = "/api/auth/login" in {x["path"] for x in self.db.list_endpoints(self.current_project_id)}
             metric_values = {
                 "DNS 解析": ("地址已解析", "success"),
                 "网络响应": (f"{result.elapsed_ms} ms", "success"),
                 "服务健康": (f"HTTP {result.status_code}", "success" if reachable else "warning"),
-                "登录接口": ("已自动识别" if login_known else "未识别固定登录接口", "success" if login_known else "warning"),
-                "Token 有效期": ("回归时自动维护", "success"),
-                "认证方式": ("按接口文档执行", "success"),
+                "登录接口": (login_path if login_known else "未识别固定登录接口", "success" if login_known else "warning"),
+                "Token 有效期": ("回归时自动维护" if login_known else "待识别登录规则", "success" if login_known else "warning"),
+                "认证方式": ("按接口文档执行" if login_known else "请在接口资产中确认", "success" if login_known else "warning"),
                 "发现接口数量": (f"{endpoint_count} 个", "success"),
                 "可访问接口数量": (f"{endpoint_count if reachable else 0} 个", "success" if reachable else "warning"),
                 "不可访问接口数量": ("0 个" if reachable else f"{endpoint_count} 个", "success" if reachable else "warning"),
@@ -4069,7 +5701,7 @@ class MainWindow(QMainWindow):
                 "认证校验": (
                     "通过" if login_known else "需确认",
                     "success" if login_known else "warning",
-                    "认证规则已识别，Token 可用于后续请求。" if login_known else "未识别固定登录接口，请按接口文档确认认证方式。",
+                    f"已识别 {login_path}；实际登录请在“接口资产 → 调试”验证。" if login_known else "未识别固定登录接口，请在接口资产中确认认证方式。",
                 ),
                 "接口资产校验": (
                     "通过" if reachable else "部分异常",
@@ -4100,8 +5732,8 @@ class MainWindow(QMainWindow):
                 (event_time(), "DNS 解析", "success"),
                 (event_time(), "网络连通性检查", "success"),
                 (event_time(), f"服务健康检查（HTTP {result.status_code}）", "success" if reachable else "warning"),
-                (event_time(), "登录认证规则识别" if login_known else "未发现固定登录接口", "success" if login_known else "warning"),
-                (event_time(), "Token 获取规则已识别", "success"),
+                (event_time(), f"登录认证规则识别：{login_path}" if login_known else "未发现固定登录接口", "success" if login_known else "warning"),
+                (event_time(), "Token 获取规则已识别" if login_known else "Token 获取规则待确认", "success" if login_known else "warning"),
                 (event_time(), f"接口资产加载：{endpoint_count} 个接口", "success"),
                 (event_time(), "接口可访问性校验", "success" if reachable else "warning"),
                 (event_time(), "校验完成", "success" if reachable else "warning"),
@@ -4168,6 +5800,10 @@ class MainWindow(QMainWindow):
         if not self.current_project_id:
             QMessageBox.information(self, "提示", "请先选择项目"); return
         try:
+            environment_name = self.env_selector.currentText().strip() if hasattr(self, "env_selector") else self.env_name.text().strip()
+            if not environment_name:
+                raise ValueError("环境名称不能为空")
+            self.env_name.setText(environment_name)
             headers = json.loads(self.headers.toPlainText() or "{}")
             values = json.loads(self.variables.toPlainText() or "{}")
             username = self.auth_username.text().strip() if hasattr(self, "auth_username") else ""
@@ -4180,17 +5816,18 @@ class MainWindow(QMainWindow):
             if not isinstance(values, dict): raise ValueError("环境变量必须是 JSON 对象")
             public, secrets = split_sensitive(values)
             self.db.save_environment(
-                self.current_project_id, self.env_name.text(), self.base_url.text(), headers,
+                self.current_project_id, environment_name, self.base_url.text(), headers,
                 public, self.secret_store.encrypt_dict(secrets),
             )
             self.db.set_setting(
-                f"environment_authorized:{self.current_project_id}:{self.env_name.text().strip()}",
+                f"environment_authorized:{self.current_project_id}:{environment_name}",
                 "1" if self.environment_confirmed.isChecked() else "0",
             )
             self.db.audit(self.current_project_id, "save_environment",
-                          {"name": self.env_name.text(), "secret_count": len(secrets)})
+                          {"name": environment_name, "secret_count": len(secrets)})
             self.statusBar().showMessage("项目运行配置已保存，后续可直接生成并一键执行用例。", 4000)
             self._project_changed()
+            QMessageBox.information(self, "环境已保存", f"已保存环境：{environment_name}\nRunner Manifest 的 environment_id 请使用这个名称。")
         except ValueError as exc:
             QMessageBox.warning(self, "配置错误", str(exc))
 
@@ -4200,15 +5837,56 @@ class MainWindow(QMainWindow):
             return
         try:
             headers = json.loads(self.headers.toPlainText() or "{}")
-            body = None if self.method.currentText() in {"GET", "HEAD"} else json.loads(self.body.toPlainText() or "null")
-            result = execute_request(self.method.currentText(), self.base_url.text(), self.path.text(), headers, body)
+            body, content_type = self._endpoint_body_payload()
+            request_path, query, extra_headers = self._endpoint_request_overrides()
+            headers.update(extra_headers)
+            result = execute_request(
+                self.method.currentText(), self.base_url.text(), request_path, headers, body,
+                params=query, content_type=content_type,
+            )
             self._last_request_result = result
             self.response.setPlainText(json.dumps({
                 "status_code": result.status_code, "elapsed_ms": result.elapsed_ms,
                 "headers": result.headers, "body": result.body,
             }, ensure_ascii=False, indent=2))
+            if hasattr(self, "endpoint_response_meta"):
+                payload_size = len(json.dumps(result.body, ensure_ascii=False).encode("utf-8"))
+                self.endpoint_response_meta.setText(
+                    f"状态：{result.status_code}    耗时：{result.elapsed_ms} ms    大小：{payload_size} B"
+                )
         except Exception as exc:
             QMessageBox.critical(self, "请求失败", str(exc))
+
+    def verify_environment_login(self):
+        """Check the discovered login endpoint without exposing a password or token."""
+        if not self.environment_confirmed.isChecked():
+            QMessageBox.warning(self, "执行被阻止", "请先确认目标是已授权的测试环境。")
+            return
+        username, password = self.auth_username.text().strip(), self.auth_password.text()
+        if not username or not password:
+            QMessageBox.warning(self, "缺少认证信息", "请先填写并保存测试账号与测试密码。")
+            return
+        _, login = self._detected_project_auth()
+        login_path = str((login or {}).get("path") or "/auth/login")
+        try:
+            result = execute_request("POST", self.base_url.text(), login_path, {}, {"username": username, "password": password})
+            self._last_request_result = result
+            self.response.setPlainText(json.dumps({
+                "login_path": login_path,
+                "status_code": result.status_code,
+                "elapsed_ms": result.elapsed_ms,
+                "body": result.body,
+            }, ensure_ascii=False, indent=2))
+            if hasattr(self, "endpoint_response_meta"):
+                self.endpoint_response_meta.setText(
+                    f"状态：{result.status_code}    耗时：{result.elapsed_ms} ms    登录验证"
+                )
+            if 200 <= result.status_code < 300:
+                self.statusBar().showMessage("登录验证完成；响应中的 Token 已自动脱敏。", 4000)
+            else:
+                QMessageBox.warning(self, "登录验证失败", f"HTTP {result.status_code}，请查看下方脱敏响应。")
+        except Exception as exc:
+            QMessageBox.critical(self, "登录验证失败", str(exc))
 
     def save_request_as_case(self):
         """Turn an authorised debugging request into an editable draft case."""
@@ -4216,15 +5894,20 @@ class MainWindow(QMainWindow):
             return
         try:
             headers = json.loads(self.headers.toPlainText() or "{}")
-            body = None if self.method.currentText() in {"GET", "HEAD"} else json.loads(self.body.toPlainText() or "null")
+            body, content_type = self._endpoint_body_payload()
+            request_path, query, extra_headers = self._endpoint_request_overrides()
+            headers.update(extra_headers)
             if not isinstance(headers, dict):
                 raise ValueError("Headers 必须是 JSON 对象")
             status = getattr(getattr(self, "_last_request_result", None), "status_code", 200)
             definition = {
-                "name": f"{self.method.currentText()} {self.path.text()} 调试用例",
+                "name": f"{self.method.currentText()} {request_path} 调试用例",
                 "priority": "P1", "module": "手工调试", "source": "request_debug",
                 "review_status": "draft", "risk": "high" if self.method.currentText() in {"POST", "PUT", "PATCH", "DELETE"} else "low",
-                "request": {"method": self.method.currentText(), "path": self.path.text(), "headers": headers, "body": body},
+                "request": {
+                    "method": self.method.currentText(), "path": request_path, "query": query,
+                    "headers": headers, "body": body, "content_type": content_type,
+                },
                 "assertions": [{"type": "status_code", "expected": status}],
             }
             self.db.save_test_cases(self.current_project_id, [definition])
@@ -4509,17 +6192,20 @@ class MainWindow(QMainWindow):
             )
             # 证据报告不隶属于一次 test_run，本身没有 status/started_at 字段；
             # 统一为可展示的已完成记录，兼容已有本地数据库。
-            rows.extend(
-                {
+            def evidence_row(row: dict) -> dict:
+                try:
+                    evidence_summary = json.loads(row.get("summary_json") or "{}")
+                except (TypeError, ValueError):
+                    evidence_summary = {}
+                return {
                     **row,
                     "report_name": self.projects.currentText(),
                     "run_id": row.get("id", ""),
-                    "status": row.get("status") or "completed",
+                    "status": evidence_summary.get("status") or "completed",
                     "started_at": row.get("started_at") or row.get("created_at") or "",
                     "finished_at": row.get("finished_at") or "",
                 }
-                for row in self.db.list_evidence_reports(self.current_project_id)
-            )
+            rows.extend(evidence_row(row) for row in self.db.list_evidence_reports(self.current_project_id))
             rows.sort(key=lambda item: item.get("started_at") or item.get("created_at") or "", reverse=True)
         table = self.report_table
         table.setUpdatesEnabled(False)
@@ -4577,3 +6263,20 @@ class MainWindow(QMainWindow):
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
             QMessageBox.warning(self, "打开失败", f"无法使用系统默认程序打开：{path}")
+
+    def open_selected_report_artifacts(self):
+        row = self.report_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "提示", "请先选择一条历史报告")
+            return
+        try:
+            summary = json.loads(self._report_rows[row].get("summary_json") or "{}")
+            artifacts = summary.get("artifacts") or {}
+            root = artifacts.get("root") if isinstance(artifacts, dict) else ""
+        except (TypeError, ValueError):
+            root = ""
+        path = Path(str(root or ""))
+        if not path.is_dir():
+            QMessageBox.information(self, "没有 Runner 产物", "所选报告没有可打开的 Runner 产物目录。")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))

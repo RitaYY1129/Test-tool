@@ -115,6 +115,8 @@ class Database:
             )
             self._ensure_column(db, "environments", "variables_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "environments", "secrets_encrypted", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "environments", "capabilities_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(db, "environments", "secret_refs_json", "TEXT NOT NULL DEFAULT '[]'")
             self._apply_migrations(db)
 
     @staticmethod
@@ -443,6 +445,49 @@ class Database:
                     next_run_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_run_at TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """,
+            11: """
+                CREATE TABLE IF NOT EXISTS project_adapters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    project_key TEXT NOT NULL UNIQUE,
+                    adapter_kind TEXT NOT NULL DEFAULT 'native',
+                    schema_version TEXT NOT NULL DEFAULT '1.0',
+                    definition_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(project_id)
+                );
+                CREATE TABLE IF NOT EXISTS test_runners (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'external',
+                    command TEXT NOT NULL DEFAULT '',
+                    working_directory TEXT NOT NULL DEFAULT '',
+                    image TEXT NOT NULL DEFAULT '',
+                    version TEXT NOT NULL DEFAULT '1.0.0',
+                    capabilities_json TEXT NOT NULL DEFAULT '{}',
+                    manifest_schema_version TEXT NOT NULL DEFAULT '1.0',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(project_id, name)
+                );
+                CREATE TABLE IF NOT EXISTS runner_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    runner_id INTEGER NOT NULL REFERENCES test_runners(id) ON DELETE CASCADE,
+                    environment_id INTEGER REFERENCES environments(id) ON DELETE SET NULL,
+                    run_key TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    manifest_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    artifacts_dir TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TEXT
                 );
             """,
         }
@@ -1095,17 +1140,188 @@ class Database:
             return [dict(row) for row in db.execute("SELECT * FROM environments WHERE project_id=? ORDER BY id", (project_id,))]
 
     def save_environment(self, project_id: int, name: str, base_url: str, headers: dict,
-                         variables: dict | None = None, secrets_encrypted: str = "") -> None:
+                         variables: dict | None = None, secrets_encrypted: str = "",
+                         *, capabilities: dict | None = None, secret_refs: list[str] | None = None) -> None:
         with self.connect() as db:
+            existing = db.execute(
+                "SELECT capabilities_json,secret_refs_json FROM environments WHERE project_id=? AND name=?",
+                (project_id, name.strip()),
+            ).fetchone()
+            current_capabilities = json.loads(existing["capabilities_json"] or "{}") if existing else {}
+            current_secret_refs = json.loads(existing["secret_refs_json"] or "[]") if existing else []
+            stored_capabilities = capabilities if capabilities is not None else current_capabilities
+            stored_secret_refs = secret_refs if secret_refs is not None else current_secret_refs
+            if not isinstance(stored_capabilities, dict):
+                raise ValueError("环境 capabilities 必须是对象")
+            if not isinstance(stored_secret_refs, list) or not all(isinstance(item, str) and item.strip() for item in stored_secret_refs):
+                raise ValueError("环境 secret_refs 必须是非空字符串列表")
             db.execute(
-                """INSERT INTO environments(project_id,name,base_url,headers_json,variables_json,secrets_encrypted)
-                   VALUES (?,?,?,?,?,?)
+                """INSERT INTO environments(project_id,name,base_url,headers_json,variables_json,secrets_encrypted,capabilities_json,secret_refs_json)
+                   VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(project_id,name) DO UPDATE SET base_url=excluded.base_url,
                    headers_json=excluded.headers_json,variables_json=excluded.variables_json,
-                   secrets_encrypted=excluded.secrets_encrypted""",
+                   secrets_encrypted=excluded.secrets_encrypted,capabilities_json=excluded.capabilities_json,
+                   secret_refs_json=excluded.secret_refs_json""",
                 (project_id, name.strip(), base_url.strip(), json.dumps(headers, ensure_ascii=False),
-                 json.dumps(variables or {}, ensure_ascii=False), secrets_encrypted),
+                 json.dumps(variables or {}, ensure_ascii=False), secrets_encrypted,
+                 json.dumps(stored_capabilities, ensure_ascii=False), json.dumps(stored_secret_refs, ensure_ascii=False)),
             )
+
+    def save_project_adapter(self, project_id: int, project_key: str, definition: dict,
+                             adapter_kind: str = "external", schema_version: str = "1.0") -> int:
+        if not project_key.strip():
+            raise ValueError("项目 Adapter Key 不能为空")
+        if not isinstance(definition, dict):
+            raise ValueError("项目 Adapter 定义必须是对象")
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO project_adapters(project_id,project_key,adapter_kind,schema_version,definition_json)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(project_id) DO UPDATE SET project_key=excluded.project_key,
+                   adapter_kind=excluded.adapter_kind,schema_version=excluded.schema_version,
+                   definition_json=excluded.definition_json,updated_at=CURRENT_TIMESTAMP""",
+                (project_id, project_key.strip(), adapter_kind.strip() or "external", schema_version.strip() or "1.0",
+                 json.dumps(definition, ensure_ascii=False)),
+            )
+            row = db.execute("SELECT id FROM project_adapters WHERE project_id=?", (project_id,)).fetchone()
+        assert row is not None
+        return int(row["id"])
+
+    def get_project_adapter_by_key(self, project_key: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM project_adapters WHERE project_key=?", (project_key,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["definition"] = json.loads(result.pop("definition_json") or "{}")
+        return result
+
+    def save_runner(self, project_id: int, name: str, *, kind: str = "external", command: str = "",
+                    working_directory: str = "", image: str = "", version: str = "1.0.0",
+                    capabilities: dict | None = None, manifest_schema_version: str = "1.0", enabled: bool = True) -> int:
+        if not name.strip():
+            raise ValueError("Runner 名称不能为空")
+        if not isinstance(capabilities or {}, dict):
+            raise ValueError("Runner capabilities 必须是对象")
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO test_runners(project_id,name,kind,command,working_directory,image,version,capabilities_json,manifest_schema_version,enabled)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(project_id,name) DO UPDATE SET kind=excluded.kind,command=excluded.command,
+                   working_directory=excluded.working_directory,image=excluded.image,version=excluded.version,
+                   capabilities_json=excluded.capabilities_json,manifest_schema_version=excluded.manifest_schema_version,
+                   enabled=excluded.enabled,updated_at=CURRENT_TIMESTAMP""",
+                (project_id, name.strip(), kind.strip() or "external", command.strip(), working_directory.strip(), image.strip(),
+                 version.strip() or "1.0.0", json.dumps(capabilities or {}, ensure_ascii=False),
+                 manifest_schema_version.strip() or "1.0", int(enabled)),
+            )
+            row = db.execute("SELECT id FROM test_runners WHERE project_id=? AND name=?", (project_id, name.strip())).fetchone()
+        assert row is not None
+        return int(row["id"])
+
+    def get_runner_by_name(self, project_id: int, name: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM test_runners WHERE project_id=? AND name=?", (project_id, name)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["enabled"] = bool(result["enabled"])
+        result["capabilities"] = json.loads(result.pop("capabilities_json") or "{}")
+        return result
+
+    def get_environment(self, project_id: int, name: str) -> dict | None:
+        """Return environment metadata needed for external-runner policy checks.
+
+        Secrets remain encrypted or referenced; callers never receive decrypted
+        credentials from this method.
+        """
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM environments WHERE project_id=? AND name=?",
+                (project_id, name),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["headers"] = json.loads(result.pop("headers_json") or "{}")
+        result["variables"] = json.loads(result.pop("variables_json") or "{}")
+        result["capabilities"] = json.loads(result.pop("capabilities_json") or "{}")
+        result["secret_refs"] = json.loads(result.pop("secret_refs_json") or "[]")
+        return result
+
+    def list_runners(self, project_id: int) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM test_runners WHERE project_id=? ORDER BY name", (project_id,)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["enabled"] = bool(item["enabled"])
+            item["capabilities"] = json.loads(item.pop("capabilities_json") or "{}")
+            result.append(item)
+        return result
+
+    def create_runner_run(self, project_id: int, runner_id: int, manifest: dict) -> int:
+        environment_id = None
+        environment_name = str(manifest.get("environment_id") or "")
+        with self.connect() as db:
+            if environment_name:
+                row = db.execute("SELECT id FROM environments WHERE project_id=? AND name=?", (project_id, environment_name)).fetchone()
+                if row is None:
+                    raise ValueError(f"项目未配置环境：{environment_name}")
+                environment_id = int(row["id"])
+            cursor = db.execute(
+                """INSERT INTO runner_runs(project_id,runner_id,environment_id,run_key,status,manifest_json,artifacts_dir)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (project_id, runner_id, environment_id, str(manifest["run_id"]), "queued",
+                 json.dumps(manifest, ensure_ascii=False), str(manifest.get("artifacts_dir") or "")),
+            )
+            return int(cursor.lastrowid)
+
+    def get_runner_run(self, run_id: int) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM runner_runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["manifest"] = json.loads(result.pop("manifest_json") or "{}")
+        result["result"] = json.loads(result.pop("result_json") or "{}")
+        return result
+
+    def start_runner_run(self, run_id: int) -> None:
+        """Mark a queued external task as locally handed to its registered Runner."""
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE runner_runs SET status='running' WHERE id=? AND status='queued'", (run_id,)
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"外部 Runner 任务不可启动：{run_id}")
+
+    def finish_runner_run(self, run_id: int, result: dict) -> None:
+        status = str(result.get("status") or "error")
+        with self.connect() as db:
+            cursor = db.execute(
+                """UPDATE runner_runs SET status=?,result_json=?,finished_at=CURRENT_TIMESTAMP,
+                   artifacts_dir=COALESCE(NULLIF(?, ''), artifacts_dir) WHERE id=?""",
+                (status, json.dumps(result, ensure_ascii=False), str((result.get("artifacts") or {}).get("root") or ""), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"外部 Runner 运行记录不存在：{run_id}")
+
+    def list_runner_runs(self, project_id: int) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT rr.*,tr.name AS runner_name,e.name AS environment_name
+                   FROM runner_runs rr JOIN test_runners tr ON tr.id=rr.runner_id
+                   LEFT JOIN environments e ON e.id=rr.environment_id
+                   WHERE rr.project_id=? ORDER BY rr.id DESC""", (project_id,)
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["manifest"] = json.loads(item.pop("manifest_json") or "{}")
+            item["result"] = json.loads(item.pop("result_json") or "{}")
+            results.append(item)
+        return results
 
     def add_manual_endpoint(self, project_id: int, definition: dict) -> int:
         with self.connect() as db:
@@ -1297,3 +1513,12 @@ class Database:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM evidence_reports WHERE project_id=? ORDER BY id DESC", (project_id,)
             )]
+
+    def delete_runner_run(self, run_id: int) -> None:
+        """Delete one platform runner task after the UI has obtained confirmation."""
+        with self.connect() as db:
+            db.execute("DELETE FROM runner_runs WHERE id=?", (run_id,))
+
+    def delete_evidence_report(self, report_id: int) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM evidence_reports WHERE id=?", (report_id,))

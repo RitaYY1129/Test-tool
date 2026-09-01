@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable
+from uuid import uuid4
 
 from testpilot.common.security import redact
 from testpilot.engines.assertions import evaluate
@@ -24,6 +25,49 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class WorkflowError(RuntimeError):
     pass
+
+
+@dataclass(slots=True)
+class ResourceLedger:
+    """Auditable cleanup ledger for resources created by a confirmed workflow.
+
+    The workflow engine only records resources it can prove it created (today:
+    database fixtures).  It deliberately does not guess whether arbitrary HTTP
+    writes were cleaned up; those must declare explicit compensation in the
+    owning SteelMill Runner.
+    """
+
+    run_id: str
+    entries: list[dict]
+
+    @classmethod
+    def create(cls, run_id: str | None = None) -> "ResourceLedger":
+        return cls(run_id or f"workflow_{uuid4().hex}", [])
+
+    def record_fixture(self, result: dict, cleanup: dict | None = None) -> None:
+        for row_id in result.get("ids") or []:
+            self.entries.append({
+                "resource_type": "database_row",
+                "resource": f"{result.get('table', '')}:{row_id}",
+                "created": True,
+                "cleanup": redact(cleanup or {"kind": "db_delete", "table": result.get("table"), "where": {"id": row_id}}),
+                "cleanup_status": "pending",
+            })
+
+    def record_compensations(self, results: list[dict]) -> None:
+        status = "passed" if results and all(item.get("status") == "passed" for item in results) else "error"
+        for entry in self.entries:
+            entry["cleanup_status"] = status
+
+    def to_dict(self) -> dict:
+        remaining = [entry for entry in self.entries if entry.get("cleanup_status") != "passed"]
+        return {"run_id": self.run_id, "resources": self.entries, "remaining": remaining}
+
+    def write(self, path: str | Path) -> Path:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return target
 
 
 @dataclass(slots=True)
@@ -106,16 +150,21 @@ def run_workflow(workflow: dict, base_url: str, common_headers: dict | None = No
                  fixtures: list[dict] | None = None, on_step: Callable[[dict], None] | None = None,
                  stop_event: Event | None = None, trace: TraceCollector | None = None,
                  file_observer: FileSideEffectObserver | None = None,
-                 message_observer: MessageObserver | None = None) -> tuple[list[dict], dict]:
+                 message_observer: MessageObserver | None = None,
+                 ledger_path: str | Path | None = None) -> tuple[list[dict], dict]:
     """Run a confirmed workflow sequentially with assertions and compensation."""
     if workflow.get("review_status") != "confirmed":
         raise WorkflowError("业务流程必须先人工确认")
     steps = workflow.get("steps") or []
+    _validate_workflow_controls(workflow, steps)
     runtime = dict(variables or {})
+    ledger = ResourceLedger.create(str(workflow.get("run_id") or "") or None)
     results: list[dict] = []
     compensations: list[dict] = []
     failed = False
     started = time.perf_counter()
+    deadline_seconds = workflow.get("deadline_seconds")
+    deadline = started + float(deadline_seconds) if deadline_seconds is not None else None
     started_at = datetime.now().isoformat(timespec="seconds")
     observations = workflow.get("state_observations") or []
     state_before = database.snapshot(observations, runtime) if observations and database else {}
@@ -131,6 +180,7 @@ def run_workflow(workflow: dict, base_url: str, common_headers: dict | None = No
             raise WorkflowError("准备数据库夹具需要配置测试数据库")
         result = database.insert_fixture(fixture)
         results.append({"name": fixture.get("name", "fixture"), "kind": "fixture", "status": "passed", **result})
+        ledger.record_fixture(result, fixture.get("compensation"))
         for row_id in result.get("ids") or []:
             if row_id is not None:
                 compensations.append({"kind": "db_delete", "table": result["table"], "where": {"id": row_id}})
@@ -139,21 +189,43 @@ def run_workflow(workflow: dict, base_url: str, common_headers: dict | None = No
             compensations.append(compensation)
 
     for index, step in enumerate(steps, 1):
+        step_id = _step_identifier(step, index)
+        if deadline is not None and time.perf_counter() >= deadline:
+            result = {"step_order": index, "step_id": step_id, "name": step.get("name", f"步骤 {index}"), "kind": step.get("kind", "http"), "status": "error", "error": "流程已超过 deadline_seconds"}
+            results.append(result); failed = True
+            if on_step:
+                on_step(result)
+            break
         if stop_event and stop_event.is_set():
-            result = {"step_order": index, "name": step.get("name", f"步骤 {index}"), "status": "skipped", "error": "任务已停止"}
+            result = {"step_order": index, "step_id": step_id, "name": step.get("name", f"步骤 {index}"), "status": "skipped", "error": "任务已停止"}
             results.append(result)
             if on_step:
                 on_step(result)
             failed = True
             break
         step_started = time.perf_counter()
-        result = {"step_order": index, "name": step.get("name", f"步骤 {index}"), "kind": step.get("kind", "http")}
+        result = {"step_order": index, "step_id": step_id, "name": step.get("name", f"步骤 {index}"), "kind": step.get("kind", "http")}
+        result_by_id = {str(item.get("step_id")): item for item in results}
+        dependencies = [str(item) for item in step.get("depends_on") or []]
+        blocked_by = [item for item in dependencies if result_by_id.get(item, {}).get("status") != "passed"]
+        if blocked_by:
+            result.update(status="skipped", error=f"依赖步骤未通过：{', '.join(blocked_by)}")
+            results.append(result)
+            if on_step:
+                on_step(result)
+            continue
+        if not _condition_matches(resolve(step.get("when", True), runtime), runtime):
+            result.update(status="skipped", reason="when 条件不满足")
+            results.append(result)
+            if on_step:
+                on_step(result)
+            continue
         if trace:
             trace.start_span(result["name"], step_order=index, kind=result["kind"])
         try:
             kind = step.get("kind", "http")
             if kind == "http":
-                result.update(_run_http_step(step, base_url, common_headers or {}, runtime))
+                result.update(_run_http_step_with_poll(step, base_url, common_headers or {}, runtime, deadline))
             elif kind == "db_assertion":
                 if not database:
                     raise WorkflowError("数据库断言需要配置测试数据库")
@@ -167,6 +239,7 @@ def run_workflow(workflow: dict, base_url: str, common_headers: dict | None = No
                     raise WorkflowError("夹具步骤需要配置测试数据库")
                 inserted = database.insert_fixture(resolve(step.get("fixture") or {}, runtime))
                 result.update(status="passed", **inserted)
+                ledger.record_fixture(inserted, step.get("compensation"))
                 for row_id in inserted.get("ids") or []:
                     if row_id is not None:
                         compensations.append({"kind": "db_delete", "table": inserted["table"], "where": {"id": row_id}})
@@ -206,6 +279,8 @@ def run_workflow(workflow: dict, base_url: str, common_headers: dict | None = No
             break
 
     compensation_results = _run_compensations(compensations, database, base_url, common_headers or {}, runtime)
+    ledger.record_compensations(compensation_results)
+    ledger_file = ledger.write(ledger_path) if ledger_path else None
     state_after = database.snapshot(observations, runtime) if observations and database else {}
     files_after = file_observer.snapshot() if file_observer else {}
     messages_after = message_observer.snapshot() if message_observer else []
@@ -229,6 +304,8 @@ def run_workflow(workflow: dict, base_url: str, common_headers: dict | None = No
         "completed_steps": sum(item.get("status") == "passed" for item in results if item.get("kind") != "fixture"),
         "failed_steps": sum(item.get("status") in {"failed", "error"} for item in results),
         "compensations": compensation_results,
+        "resource_ledger": ledger.to_dict(),
+        "resource_ledger_path": str(ledger_file) if ledger_file else "",
         "state_observations": {"before": redact(state_before), "after": redact(state_after), "check": state_check},
         "side_effects": {"files": FileSideEffectObserver.diff(files_before, files_after) if file_observer else [], "messages_before": len(messages_before), "messages_after": len(messages_after)},
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
@@ -238,6 +315,52 @@ def run_workflow(workflow: dict, base_url: str, common_headers: dict | None = No
         "process_coverage": process_coverage,
     }
     return results, summary
+
+
+def _step_identifier(step: dict, index: int) -> str:
+    return str(step.get("step_id") or step.get("id") or index)
+
+
+def _validate_workflow_controls(workflow: dict, steps: list[dict]) -> None:
+    deadline = workflow.get("deadline_seconds")
+    if deadline is not None and (isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or deadline <= 0):
+        raise WorkflowError("deadline_seconds 必须是正数")
+    identifiers = [_step_identifier(step, index) for index, step in enumerate(steps, 1)]
+    if len(set(identifiers)) != len(identifiers):
+        raise WorkflowError("workflow step_id 不能重复")
+    known = set(identifiers)
+    for index, step in enumerate(steps, 1):
+        dependencies = step.get("depends_on") or []
+        if not isinstance(dependencies, list) or not all(str(item) in known for item in dependencies):
+            raise WorkflowError(f"步骤 {_step_identifier(step, index)} 包含未知 depends_on")
+        poll = step.get("poll_until")
+        if poll is not None:
+            if step.get("kind", "http") != "http" or not isinstance(poll, dict):
+                raise WorkflowError("poll_until 仅支持 HTTP 步骤，且必须是对象")
+            timeout = poll.get("timeout_seconds", 30)
+            interval = poll.get("interval_seconds", 1)
+            if any(isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 for value in (timeout, interval)):
+                raise WorkflowError("poll_until 的 timeout_seconds 和 interval_seconds 必须是正数")
+
+
+def _condition_matches(condition: Any, variables: dict) -> bool:
+    """Evaluate a deliberately small declarative `when` grammar; never eval code."""
+    if isinstance(condition, dict):
+        if "all" in condition:
+            return all(_condition_matches(item, variables) for item in condition["all"])
+        if "any" in condition:
+            return any(_condition_matches(item, variables) for item in condition["any"])
+        if "not" in condition:
+            return not _condition_matches(condition["not"], variables)
+        value = variables.get(str(condition.get("variable") or "")) if "variable" in condition else condition.get("value")
+        if "equals" in condition:
+            return value == condition["equals"]
+        if "not_equals" in condition:
+            return value != condition["not_equals"]
+        if condition.get("exists") is True:
+            return value not in {None, ""}
+        return bool(value)
+    return bool(condition)
 
 
 def _compare_state_observations(before: dict, after: dict, expectations: dict) -> dict:
@@ -289,6 +412,32 @@ def _run_http_step(step: dict, base_url: str, common_headers: dict, variables: d
         "response_headers": redact(response.headers),
         "response_body": response.body,
     }
+
+
+def _run_http_step_with_poll(step: dict, base_url: str, common_headers: dict, variables: dict,
+                             workflow_deadline: float | None) -> dict:
+    """Repeat a read HTTP step until its declarative assertions pass or expire."""
+    poll = step.get("poll_until")
+    if not poll:
+        return _run_http_step(step, base_url, common_headers, variables)
+    timeout = float(poll.get("timeout_seconds", 30))
+    interval = float(poll.get("interval_seconds", 1))
+    expires = time.perf_counter() + timeout
+    if workflow_deadline is not None:
+        expires = min(expires, workflow_deadline)
+    attempts = 0
+    last_result: dict = {}
+    while True:
+        attempts += 1
+        attempt = dict(step)
+        attempt["assertions"] = poll.get("assertions", step.get("assertions", []))
+        last_result = _run_http_step(attempt, base_url, common_headers, variables)
+        if last_result.get("status") == "passed":
+            return {**last_result, "poll_attempts": attempts}
+        remaining = expires - time.perf_counter()
+        if remaining <= 0:
+            return {**last_result, "status": "failed", "poll_attempts": attempts, "error": "poll_until 超时"}
+        time.sleep(min(interval, remaining))
 
 
 def _run_db_assertion(step: dict, database: SqliteTestDatabase, variables: dict) -> dict:

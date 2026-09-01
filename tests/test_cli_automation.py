@@ -88,3 +88,39 @@ def test_terminal_only_openapi_to_report_flow(tmp_path, capsys):
         assert '"passed": 1' in capsys.readouterr().out
     finally:
         server.shutdown()
+
+
+def test_cli_registers_queues_and_archives_external_runner(tmp_path, capsys):
+    db_path = tmp_path / "runner.db"
+    assert main(["--db", str(db_path), "project-create", "--name", "SteelMill"]) == 0
+    project_id = Database(db_path).list_projects()[0]["id"]
+    assert main([
+        "--db", str(db_path), "environment-set", "--project", str(project_id), "--name", "staging",
+        "--base-url", "https://staging.example.test", "--capabilities-json", '{"allow_mutation": false}',
+        "--secret-refs-json", '["steelmill-staging-account"]',
+    ]) == 0
+    assert main([
+        "--db", str(db_path), "runner-register", "--project", str(project_id), "--project-key", "steelmill",
+        "--name", "steelmill-runner", "--version", "0.1.0",
+    ]) == 0
+    manifest = {
+        "schema_version": "1.0", "run_id": "steelmill_unit_001", "project_id": "steelmill",
+        "runner": {"name": "steelmill-runner", "version": "0.1.0"}, "environment_id": "staging",
+        "selection": {"paths": ["tests"], "markers": ["unit"], "case_ids": []},
+        "policy": {"allow_mutation": False, "timeout_seconds": 60, "parallel_workers": 1, "retry_policy": "none"},
+        "artifacts_dir": "artifacts/steelmill_unit_001",
+    }
+    result = {
+        "schema_version": "1.0", "run_id": "steelmill_unit_001", "status": "passed",
+        "summary": {"total": 1, "passed": 1, "failed": 0, "error": 0, "skipped": 0},
+        "cases": [{"id": "unit.contract", "status": "passed"}], "artifacts": {"html": "report.html"},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    result_path = tmp_path / "result.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    assert main(["--db", str(db_path), "runner-run-queue", "--manifest", str(manifest_path)]) == 0
+    runner_run_id = Database(db_path).list_runner_runs(project_id)[0]["id"]
+    assert main(["--db", str(db_path), "runner-run-complete", "--run-id", str(runner_run_id), "--result", str(result_path)]) == 0
+    assert main(["--db", str(db_path), "runner-run-list", "--project", str(project_id)]) == 0
+    assert '"status": "passed"' in capsys.readouterr().out

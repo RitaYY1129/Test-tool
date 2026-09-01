@@ -10,6 +10,7 @@ from testpilot.common.security import SecretStore
 from testpilot.cases.exchange import export_cases, import_cases
 from testpilot.cases.generator import generate_cases
 from testpilot.engines.batch_runner import run_cases
+from testpilot.engines.external_runner import complete_external_run, queue_external_run
 from testpilot.notifications import notify
 from testpilot.parsers.completeness_checker import check_completeness
 from testpilot.parsers.openapi_parser import OpenApiParser
@@ -72,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     environment_set.add_argument("--base-url", required=True)
     environment_set.add_argument("--headers-json", default="{}")
     environment_set.add_argument("--variables-json", default="{}")
+    environment_set.add_argument("--capabilities-json", default="{}")
+    environment_set.add_argument("--secret-refs-json", default="[]")
     environment_list = sub.add_parser("environment-list", help="列出项目环境")
     environment_list.add_argument("--project", type=int, required=True)
     openapi = sub.add_parser("openapi-import", help="导入 OpenAPI 或 Swagger 文件")
@@ -90,6 +93,20 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--environment", required=True)
     run.add_argument("--retries", type=int, default=0)
     run.add_argument("--notify-json", default="", help="通知配置 JSON 文件")
+    runner_register = sub.add_parser("runner-register", help="注册不执行 Shell 的外部 Runner")
+    runner_register.add_argument("--project", type=int, required=True)
+    runner_register.add_argument("--project-key", required=True, help="例如 steelmill")
+    runner_register.add_argument("--name", required=True, help="例如 steelmill-runner")
+    runner_register.add_argument("--version", required=True)
+    runner_register.add_argument("--manifest-schema-version", default="1.0")
+    runner_register.add_argument("--command", dest="runner_command", default="", help="仅保存供受控 Worker 使用，CLI 不会执行")
+    runner_queue = sub.add_parser("runner-run-queue", help="校验并登记外部 Runner Manifest")
+    runner_queue.add_argument("--manifest", required=True)
+    runner_complete = sub.add_parser("runner-run-complete", help="归档外部 Runner result.json")
+    runner_complete.add_argument("--run-id", type=int, required=True, help="平台运行记录 ID")
+    runner_complete.add_argument("--result", required=True)
+    runner_list = sub.add_parser("runner-run-list", help="列出外部 Runner 运行记录")
+    runner_list.add_argument("--project", type=int, required=True)
     trend = sub.add_parser("trend", help="输出最近执行趋势 JSON")
     trend.add_argument("--project", type=int, required=True)
     export = sub.add_parser("export-cases", help="导出项目用例模板")
@@ -124,7 +141,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(db.list_projects(), ensure_ascii=False, indent=2))
         return 0
     if args.command == "environment-set":
-        db.save_environment(args.project, args.name, args.base_url, json.loads(args.headers_json), json.loads(args.variables_json))
+        db.save_environment(
+            args.project, args.name, args.base_url, json.loads(args.headers_json), json.loads(args.variables_json),
+            capabilities=json.loads(args.capabilities_json), secret_refs=json.loads(args.secret_refs_json),
+        )
         print(json.dumps({"project": args.project, "environment": args.name}, ensure_ascii=False))
         return 0
     if args.command == "environment-list":
@@ -182,6 +202,27 @@ def main(argv: list[str] | None = None) -> int:
         summary, report = execute(db, args.project, args.environment, args.retries, notification)
         print(json.dumps({"summary": summary, "report": str(report)}, ensure_ascii=False))
         return 0 if not (summary["failed"] or summary["error"]) else 2
+    if args.command == "runner-register":
+        db.save_project_adapter(args.project, args.project_key, {})
+        runner_id = db.save_runner(
+            args.project, args.name, version=args.version, command=args.runner_command,
+            manifest_schema_version=args.manifest_schema_version,
+        )
+        print(json.dumps({"runner_id": runner_id, "project_key": args.project_key, "name": args.name}, ensure_ascii=False))
+        return 0
+    if args.command == "runner-run-queue":
+        manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+        run_id = queue_external_run(db, manifest)
+        print(json.dumps({"runner_run_id": run_id, "run_id": manifest["run_id"], "status": "queued"}, ensure_ascii=False))
+        return 0
+    if args.command == "runner-run-complete":
+        result = json.loads(Path(args.result).read_text(encoding="utf-8"))
+        complete_external_run(db, args.run_id, result)
+        print(json.dumps({"runner_run_id": args.run_id, "status": result["status"]}, ensure_ascii=False))
+        return 0
+    if args.command == "runner-run-list":
+        print(json.dumps(db.list_runner_runs(args.project), ensure_ascii=False, indent=2))
+        return 0
     while True:
         for task in db.list_due_schedules():
             try:

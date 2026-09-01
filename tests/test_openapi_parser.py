@@ -29,3 +29,19 @@ def test_parse_swagger_2():
     assert document.base_urls == ["http://localhost:8000/api"]
     assert document.endpoints[0].path == "/users"
 
+
+def test_resolves_request_body_and_parameter_refs_for_debugger():
+    document = OpenApiParser().parse_dict({
+        "openapi": "3.0.3", "info": {"title": "refs", "version": "1"},
+        "components": {
+            "parameters": {"page": {"name": "page", "in": "query", "schema": {"type": "integer", "default": 1}}},
+            "requestBodies": {"update": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Update"}}}}},
+            "schemas": {"Update": {"type": "object", "properties": {"name": {"type": "string", "description": "new name"}}}},
+        },
+        "paths": {"/items": {"post": {"parameters": [{"$ref": "#/components/parameters/page"}], "requestBody": {"$ref": "#/components/requestBodies/update"}, "responses": {}}}},
+    })
+    endpoint = document.endpoints[0]
+    assert endpoint.parameters[0].name == "page"
+    assert endpoint.parameters[0].schema["default"] == 1
+    assert endpoint.request_body["content"]["application/json"]["schema"]["properties"]["name"]["description"] == "new name"
+

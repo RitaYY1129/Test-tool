@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -68,3 +69,35 @@ def test_workflow_state_observation_records_before_after(tmp_path):
     _, summary = run_workflow(workflow, "https://example.test", database=SqliteTestDatabase(str(database_path)))
     assert summary["status"] == "passed"
     assert summary["state_observations"]["check"]["status"] == "passed"
+
+
+def test_workflow_controls_skip_conditional_steps_and_write_resource_ledger(tmp_path):
+    database_path = tmp_path / "ledger.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)")
+    workflow = {
+        "review_status": "confirmed", "run_id": "workflow_demo", "deadline_seconds": 5,
+        "steps": [
+            {"step_id": "prepare", "name": "prepare", "kind": "fixture", "fixture": {"table": "users", "rows": [{"name": "Ada"}]}},
+            {"step_id": "optional", "name": "optional", "kind": "db_assertion", "depends_on": ["prepare"], "when": {"variable": "RUN_OPTIONAL", "equals": True}, "assertion": {"query": "SELECT 1", "equals": 1}},
+        ],
+    }
+    ledger_path = tmp_path / "artifacts" / "resource_ledger.json"
+    results, summary = run_workflow(
+        workflow, "https://example.test", variables={"RUN_OPTIONAL": False},
+        database=SqliteTestDatabase(str(database_path), read_only=False), ledger_path=ledger_path,
+    )
+    assert results[1]["status"] == "skipped"
+    assert summary["status"] == "passed"
+    assert summary["resource_ledger"]["run_id"] == "workflow_demo"
+    assert summary["resource_ledger"]["resources"][0]["cleanup_status"] == "passed"
+    assert json.loads(ledger_path.read_text(encoding="utf-8"))["remaining"] == []
+
+
+def test_workflow_control_validation_happens_before_execution():
+    workflow = {
+        "review_status": "confirmed",
+        "steps": [{"step_id": "one", "kind": "http", "depends_on": ["missing"], "request": {"method": "GET", "path": "/"}}],
+    }
+    with pytest.raises(WorkflowError, match="depends_on"):
+        run_workflow(workflow, "https://example.test")

@@ -38,6 +38,29 @@ testpilot-run --db .\data\testpilot.db schedule
 
 部署、通知配置、Docker 和演示流程见 [部署说明](docs/deployment.md)。
 
+### SteelMill 外部 Runner 归档
+
+TestPilot 可作为 SteelMill Runner 的控制与归档端：登记项目、环境、Runner 和 Manifest，校验
+版本与 mutation 策略，随后归档 Runner 输出的 `result.json`。下列 CLI **不会执行 Shell 或启动
+SteelMill**；实际 Runner 仍在 SteelMill 仓库、Docker 或 CI Worker 中受控执行。
+
+```powershell
+# 先创建项目和环境；capabilities 约束该环境是否允许 mutation。
+testpilot-run --db .\data\testpilot.db environment-set --project 1 --name staging `
+  --base-url https://staging.example.test `
+  --capabilities-json '{"allow_mutation": false}' `
+  --secret-refs-json '["steelmill-staging-account"]'
+
+# 注册固定版本的 Runner，再登记 Manifest；命令返回 runner_run_id。
+testpilot-run --db .\data\testpilot.db runner-register --project 1 `
+  --project-key steelmill --name steelmill-runner --version 0.1.0
+testpilot-run --db .\data\testpilot.db runner-run-queue --manifest .\run-manifest.json
+
+# Runner 完成后归档其标准结果，并查询运行记录。
+testpilot-run --db .\data\testpilot.db runner-run-complete --run-id 1 --result .\result.json
+testpilot-run --db .\data\testpilot.db runner-run-list --project 1
+```
+
 ## 当前范围
 
 > 说明：当前路线 A 是“源码证据 + 基础业务流程执行”原型，不等于完整的隐藏工艺覆盖；多数据库、消息/第三方副作用观测、运行时链路和 AI 受控对话按 [V4.0 落地规划](docs/project-plan-v4.0.md) 分阶段实现。

@@ -36,8 +36,8 @@ def execute_request(method: str, base_url: str, path: str, headers: dict | None 
                 else:
                     fields[key] = str(value)
             request_options.update({"data": fields, "files": files})
-        elif content_type.startswith("text/"):
-            request_options["content"] = str(body)
+        elif content_type.startswith("text/") or content_type in {"application/xml", "application/graphql", "application/msgpack", "application/octet-stream"}:
+            request_options["content"] = body if isinstance(body, (bytes, bytearray)) else str(body)
         else:
             request_options["json"] = body
     try:

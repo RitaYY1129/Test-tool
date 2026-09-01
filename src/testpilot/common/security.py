@@ -12,7 +12,13 @@ SENSITIVE = {"authorization", "token", "access_token", "refresh_token", "passwor
 
 def redact(value):
     if isinstance(value, dict):
-        return {key: ("***" if key.lower() in SENSITIVE else redact(item)) for key, item in value.items()}
+        def is_sensitive(key: object) -> bool:
+            # APIs commonly use camelCase (accessToken) while local config tends
+            # to use snake_case (access_token). Treat both spellings equally.
+            normalized = str(key).lower().replace("_", "").replace("-", "")
+            return normalized in {"authorization", "token", "accesstoken", "refreshtoken", "password", "secret", "apikey"}
+
+        return {key: ("***" if is_sensitive(key) else redact(item)) for key, item in value.items()}
     if isinstance(value, list):
         return [redact(item) for item in value]
     return value
