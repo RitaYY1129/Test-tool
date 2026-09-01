@@ -8,7 +8,7 @@ build/
 *.db
 *.log
 src/*.egg-info/
-reports/
+/reports/
 config/master.key
 build-windows/
 build-pyinstaller/
