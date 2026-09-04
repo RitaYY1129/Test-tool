@@ -1,12 +1,12 @@
 # Phase 1：SteelMill 框架工程化加固（2～4 周）
 
-> 状态：进行中（已完成 Runner 协议、离线闭环、只读真实环境 Smoke 与平台受控归档；Docker 同 Manifest 证据和内部 CI 仍须在获准外部环境完成）
+> 状态：进行中（已完成 Runner 协议、离线闭环、只读真实环境 Smoke、平台受控归档及 Docker 离线 Unit 证据；真实 API Smoke 的 Docker 复验和内部 CI 仍须在获准环境完成）
 >
 > 前置条件：Phase 0 的平台侧协议与持久化测试通过并提交；SteelMill 测试仓库可访问；具备一个可安全执行的 `api + smoke` 测试环境。
 >
 > 关联文档：[Phase 0：多项目接口自动化框架基线](phase0-多项目接口自动化框架基线.md)
 
-## 当前实施进度（2026-08-31）
+## 当前实施进度（2026-09-03）
 
 已完成：
 
@@ -21,13 +21,13 @@
 - TestPilot 日常“一键执行”只启动已登记、已校验指纹的固定 Python + `-m runner run --manifest`；执行前要求环境授权，执行中遵循 Manifest 超时，正常归档前校验 `artifacts.root`、JUnit、HTML 与日志均在平台受控目录内；
 - TestPilot CLI 已可注册 Runner、登记 Manifest、归档 `result.json` 与查询外部运行记录；整个过程不执行任意 Shell 命令。
 - 平台业务流程已支持稳定 `step_id`、`depends_on`、声明式 `when`、HTTP `poll_until` 与全流程 `deadline_seconds`；数据库夹具会逆序清理并可输出 `resource_ledger.json`，记录明确创建的资源与清理结果。
-- SteelMill Dockerfile 与离线 unit 镜像运行说明已加入；公司电脑不安装 Docker，须在个人电脑执行镜像构建验证。
+- 已在获准个人电脑构建 `steelmill-runner:0.1.0`，使用同一份 Unit Manifest 在 `--network none` 容器内执行：pytest `16 passed`、退出码 `0`，并输出 `manifest.json`、`result.json`、`junit.xml`、`report.html`、`runner.log`、`execution.db` 与日志目录；真实账号配置未进入镜像。
 
 尚未完成：
 
 - SteelMill 侧复杂 Flow 的真实 mutation 测试接入 ResourceLedger，以及对 HTTP 创建资源的显式台账声明；平台不会猜测未知写操作是否已清理；
 - 数据库/Redis/模拟器统一观察器；
-- 同一 Manifest 的 Docker 构建/运行证据；
+- 同一 API Smoke Manifest 在 Docker 中访问获批测试环境的复验证据；
 - 内部 CI 门禁落地（当前仅提供不公开代码的本地/内部工作流预案，不能在公共仓库启用）；
 - 两个仓库的改动提交、版本发布和 TestPilot UI/调度接入（后者属于 Phase 2）。
 
@@ -182,7 +182,7 @@ Flow 强化、ResourceLedger、观察器统一和 Docker 可进入紧随其后�
 
 ### 第二步：个人电脑 Docker 一致性验证（不在公司电脑执行）
 
-公司电脑未安装 Docker，不能把“未执行 Docker”误判为代码缺陷。请只在个人电脑的**获准副本**上执行；若公司策略不允许复制公司仓库、测试环境地址或测试数据到个人电脑，则只运行脱敏的离线 unit 示例，真实环境验证改在内部构建机。
+已在个人电脑的获准副本完成脱敏离线 Unit 镜像验证：镜像 `steelmill-runner:0.1.0` 在 `--network none` 下执行同一 Unit Manifest，pytest `16 passed`，并保留完整产物。真实环境 Smoke 仍应在获批网络或内部构建机执行；不得将公司代码、测试环境地址、测试数据或 Secret 复制到未授权设备。
 
 ```powershell
 cd <获准的 SteelMill python_api_tests 目录>
