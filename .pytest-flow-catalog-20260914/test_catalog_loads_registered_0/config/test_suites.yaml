@@ -1,0 +1,9 @@
+schema_version: 1
+suites:
+  - id: readonly-smoke
+    name: 只读 Smoke
+    module: 现场作业
+    manifest: examples/smoke.json
+    description: 核心只读接口
+    risk: readonly
+    timeout_seconds: 120

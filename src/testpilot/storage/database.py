@@ -1291,7 +1291,7 @@ class Database:
         """Mark a queued external task as locally handed to its registered Runner."""
         with self.connect() as db:
             cursor = db.execute(
-                "UPDATE runner_runs SET status='running' WHERE id=? AND status='queued'", (run_id,)
+                "UPDATE runner_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=? AND status='queued'", (run_id,)
             )
             if cursor.rowcount != 1:
                 raise ValueError(f"外部 Runner 任务不可启动：{run_id}")

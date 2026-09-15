@@ -98,7 +98,7 @@ RUN pip install --no-cache-dir -e .
 实际执行命令：
 
 ```powershell
-docker run --rm --network none -v "${PWD}/examples/run-manifest.unit.example.json:/input/run-manifest.json:ro" -v "${PWD}/reports-docker:/reports" -v "${PWD}/config/accounts.example.yaml:/app/config/accounts.yaml:ro" steelmill-runner:0.1.0 run --manifest /input/run-manifest.json
+docker run --rm --network none -v "${PWD}/examples/run-manifest.unit.docker.example.json:/input/run-manifest.json:ro" -v "${PWD}/reports:/reports" -v "${PWD}/config/accounts.example.yaml:/app/config/accounts.yaml:ro" steelmill-runner:0.1.0 run --manifest /input/run-manifest.json
 ```
 
 命令含义：
@@ -108,7 +108,7 @@ docker run --rm --network none -v "${PWD}/examples/run-manifest.unit.example.jso
 | `--rm` | 结束后删除临时容器，不删除镜像和报告 |
 | `--network none` | 容器完全断网，不能访问 API、数据库、Redis 或互联网 |
 | 第一个 `-v` | 以只读方式传入 Unit Manifest |
-| 第二个 `-v` | 将容器中的 `/reports` 保存到本机 `reports-docker` |
+| 第二个 `-v` | 将容器中的 `/reports` 保存到本机 `reports/docker` |
 | 第三个 `-v` | 以只读方式传入无密钥的 `accounts.example.yaml`，不传入真实账号 |
 
 > Manifest 中的 `artifacts_dir` 是相对于 `/input/run-manifest.json` 解析的，最终为 `/reports/run_unit_example_001`，所以报告必须挂载到容器 `/reports`，不能挂到 `/app/reports`。
@@ -121,7 +121,7 @@ Python：3.13.15
 pytest：16 passed
 ```
 
-`reports-docker/run_unit_example_001` 中已生成：
+`reports/docker/examples/docker_unit_example_001` 中已生成：
 
 ```text
 manifest.json
@@ -220,7 +220,7 @@ config/config.yaml
 ```text
 1. Dockerfile：复制 conftest.py
 2. Dockerfile：使用 pip install -e .
-3. examples/run-manifest.unit.example.json：environment_id 改为 local
+3. examples/run-manifest.unit.docker.example.json：使用容器内 /reports/docker 归档路径
 ```
 
-`reports-docker` 属于运行产物，不应提交。
+`reports/docker` 属于运行产物，不应提交。

@@ -1,0 +1,8 @@
+schema_version: 1
+suites:
+  - id: unsafe
+    name: 不安全
+    module: 现场作业
+    manifest: ../outside.json
+    description: should fail
+    risk: readonly

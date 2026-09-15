@@ -1,0 +1,46 @@
+<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>
+<title>接口契约报告</title><style>
+body{font-family:Segoe UI,Microsoft YaHei,sans-serif;margin:32px;color:#1f2937}
+table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:10px;border:1px solid #ddd;text-align:left;vertical-align:top}
+.passed{color:#15803d;font-weight:600}.failed,.error{color:#b91c1c;font-weight:600}.skipped{color:#a16207;font-weight:600}
+pre{white-space:pre-wrap;word-break:break-word;margin:0}details{min-width:320px}
+</style></head><body><h1>接口契约报告</h1>
+<p>项目：CLI demo　环境：staging　路线：route_b</p>
+<h2>执行摘要</h2><pre>{
+  &quot;total&quot;: 1,
+  &quot;passed&quot;: 1,
+  &quot;failed&quot;: 0,
+  &quot;error&quot;: 0,
+  &quot;skipped&quot;: 0,
+  &quot;pass_rate&quot;: 100.0,
+  &quot;started_at&quot;: &quot;2026-09-14T15:07:51&quot;,
+  &quot;finished_at&quot;: &quot;2026-09-14T15:07:51&quot;,
+  &quot;attempts&quot;: 1
+}</pre><p>通过率：100.0%</p>
+<table><thead><tr><th>用例</th><th>模块</th><th>结果</th><th>耗时</th><th>状态码</th><th>证据</th></tr></thead><tbody><tr><td>health</td><td>未分组</td><td class='passed'>passed</td><td>276 ms</td><td>200</td><td><details><summary>查看</summary><pre>{
+  &quot;assertions&quot;: [
+    {
+      &quot;type&quot;: &quot;status_code&quot;,
+      &quot;passed&quot;: true,
+      &quot;expected&quot;: 200,
+      &quot;actual&quot;: 200
+    }
+  ],
+  &quot;request&quot;: {
+    &quot;method&quot;: &quot;GET&quot;,
+    &quot;path&quot;: &quot;/health&quot;,
+    &quot;query&quot;: {},
+    &quot;headers&quot;: {},
+    &quot;body&quot;: null
+  },
+  &quot;response_headers&quot;: {
+    &quot;server&quot;: &quot;BaseHTTP/0.6 Python/3.14.6&quot;,
+    &quot;date&quot;: &quot;Mon, 14 Sep 2026 07:07:51 GMT&quot;,
+    &quot;content-type&quot;: &quot;application/json&quot;
+  },
+  &quot;response_body&quot;: {
+    &quot;ok&quot;: true
+  },
+  &quot;cleanup_results&quot;: []
+}</pre></details></td></tr></tbody></table>
+</body></html>

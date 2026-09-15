@@ -1,0 +1,1 @@
+{"openapi": "3.0.0", "info": {"title": "terminal", "version": "1"}, "paths": {"/health": {"get": {"responses": {"200": {"description": "ok"}}}}}}

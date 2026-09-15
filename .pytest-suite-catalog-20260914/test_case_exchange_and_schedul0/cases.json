@@ -1,0 +1,13 @@
+{
+  "format": "testpilot-cases/v1",
+  "cases": [
+    {
+      "name": "template",
+      "request": {
+        "method": "GET",
+        "path": "/health"
+      },
+      "assertions": []
+    }
+  ]
+}

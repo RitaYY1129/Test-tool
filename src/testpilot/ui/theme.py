@@ -434,6 +434,79 @@ QFrame#RunnerConfigCard, QFrame#RunnerManualCard, QFrame#RunnerDetailCard {
     border-radius: 7px;
 }
 QFrame#RunnerManualCard { background: #f8fbff; }
+QLabel#RunnerProjectContext {
+    color: #244564;
+    font-size: 14px;
+    font-weight: 700;
+}
+QLabel#RunnerHealthBadge {
+    color: #16834a;
+    background: #e9f8ef;
+    border: 1px solid #c7ecd7;
+    border-radius: 12px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+QLabel#RunnerFirstRunHint {
+    color: #8b681e;
+    background: #fff9e8;
+    border: 1px solid #f0dfad;
+    border-radius: 6px;
+    padding: 9px 11px;
+    font-size: 12px;
+}
+QFrame#RunnerPreviewCard {
+    background: #f8fbff;
+    border: 1px solid #d5e5f6;
+    border-radius: 8px;
+}
+QLabel#RunnerPreviewLabel {
+    color: #71839a;
+    font-size: 12px;
+}
+QLabel#RunnerPreviewValue {
+    color: #2b4b6c;
+    font-size: 12px;
+    font-weight: 600;
+}
+QFrame#RunnerMetricBlue, QFrame#RunnerMetricGreen, QFrame#RunnerMetricAmber {
+    background: #ffffff;
+    border: 1px solid #e0e8f1;
+    border-radius: 8px;
+    min-height: 78px;
+}
+QLabel#RunnerMetricCaption { color: #71839a; font-size: 12px; }
+QLabel#RunnerMetricValue { color: #253f5b; font-size: 22px; font-weight: 700; }
+QFrame#RunnerMetricGreen QLabel#RunnerMetricValue { color: #16834a; }
+QFrame#RunnerMetricAmber QLabel#RunnerMetricValue { color: #b7791f; }
+QFrame#RunnerSuiteCard {
+    background: #ffffff;
+    border: 1px solid #dfe8f1;
+    border-radius: 8px;
+    min-height: 162px;
+}
+QLabel#RunnerSuiteMeta {
+    color: #52718f;
+    background: #edf5ff;
+    border-radius: 10px;
+    padding: 5px 8px;
+    font-size: 11px;
+}
+QPushButton#RunnerSuiteAction {
+    color: #1677e8;
+    background: #ffffff;
+    border-color: #bdd8f6;
+    min-height: 28px;
+}
+QLabel#RunnerCatalogEmpty {
+    color: #7a6b48;
+    background: #fffaf0;
+    border: 1px dashed #e7d5a6;
+    border-radius: 7px;
+    padding: 12px;
+}
+
 QTableWidget#RunnerRunTable {
     background: #ffffff;
     border: 1px solid #e0e8f1;

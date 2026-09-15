@@ -8,6 +8,27 @@
 
 ---
 
+## 0. 当前实施状态与已确认的后置策略（2026-09-11）
+
+### 当前所处阶段
+
+当前处于 **Phase 1 核心收口完成、进入 Phase 2 前的稳定运行阶段**，不是重新开始 Phase 1。已完成的 P1 能力包括：标准 Runner/Manifest/Result/产物协议、唯一 `run_id` 证据目录、Docker Runner、复杂 Flow 的本机受控真实执行与恢复、ResourceLedger、PostgreSQL/Redis/模拟器观察时间线，以及已实际通过的 Gitea 本地质量门禁。
+
+测试资产固定保留在 `test/steelmill-api-automation` 分支，后端主干 `main` 不合入该目录。日常流程为：后端更新 `main` → 测试分支同步 `origin/main` → 推送测试分支 → Gitea Runner 执行不访问真实环境的 Quality Gate。这样既保留与后端版本的关联，又保持测试代码与主干隔离。
+
+### 当前不做、但必须保留在路线中的事项
+
+| 事项 | 当前决定 | 进入时机 |
+|---|---|---|
+| Gitea 审批式只读 Smoke / Mutation 的实际手工触发 | 工作流、脚本和密钥配置保留；暂不实际触发 | 测试环境与 Gitea 手工触发路径稳定后 |
+| Runner 注册 Token 轮换 | 当前 Runner 在线可用，暂不轮换 | 后续安全维护窗口 |
+| Gitea HTTP → HTTPS | 暂不实施 | **全项目最终安全与发布收口** |
+| 两仓库版本号、Release Note、Git Tag、正式 Release | 暂不实施 | **全项目最终发布收口** |
+
+PAT 已删除；它与 Runner 注册 Token 是不同凭据，删除 PAT 不会影响正在运行的 Runner。
+
+---
+
 ## 1. 先给出最终结论
 
 当前容易混乱，是因为“测试框架”“业务用例”“平台”“CI/CD”和“Docker”都在同时发展。它们不是同一个东西，应明确分成四层。

@@ -1,0 +1,54 @@
+{
+  "project": "CLI demo",
+  "report_type": "接口契约报告",
+  "route": "route_b",
+  "environment": "staging",
+  "generated_at": "2026-09-14T15:07:51",
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "error": 0,
+    "skipped": 0,
+    "pass_rate": 100.0,
+    "started_at": "2026-09-14T15:07:51",
+    "finished_at": "2026-09-14T15:07:51",
+    "attempts": 1
+  },
+  "results": [
+    {
+      "case_id": 1,
+      "name": "health",
+      "module": "未分组",
+      "risk": "low",
+      "source": "unknown",
+      "status": "passed",
+      "elapsed_ms": 276,
+      "status_code": 200,
+      "assertions": [
+        {
+          "type": "status_code",
+          "passed": true,
+          "expected": 200,
+          "actual": 200
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "path": "/health",
+        "query": {},
+        "headers": {},
+        "body": null
+      },
+      "response_headers": {
+        "server": "BaseHTTP/0.6 Python/3.14.6",
+        "date": "Mon, 14 Sep 2026 07:07:51 GMT",
+        "content-type": "application/json"
+      },
+      "response_body": {
+        "ok": true
+      },
+      "cleanup_results": []
+    }
+  ]
+}

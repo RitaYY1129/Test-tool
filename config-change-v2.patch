@@ -1,0 +1,13 @@
+diff --git a/src/SteelMill.Test/FieldOperationsTests/python_api_tests/config/config.yaml b/src/SteelMill.Test/FieldOperationsTests/python_api_tests/config/config.yaml
+--- a/src/SteelMill.Test/FieldOperationsTests/python_api_tests/config/config.yaml
++++ b/src/SteelMill.Test/FieldOperationsTests/python_api_tests/config/config.yaml
+@@ -4,6 +4,11 @@ environments:
+   local:
+     base_url: http://127.0.0.1:5010
+     timeout_seconds: 30
+     verify_ssl: false
++    # Only for the local Docker test environment; mutation still requires --run-mutation.
++    capabilities:
++      allow_mutation: true
++      allow_database_observation: true
++      allow_external_system: false

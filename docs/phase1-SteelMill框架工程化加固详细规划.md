@@ -1,12 +1,35 @@
 # Phase 1：SteelMill 框架工程化加固（2～4 周）
 
-> 状态：进行中（已完成 Runner 协议、离线闭环、只读真实环境 Smoke、平台受控归档及 Docker 离线 Unit 证据；真实 API Smoke 的 Docker 复验和内部 CI 仍须在获准环境完成）
+> 状态：核心完成（2026-09-11；发布与基础设施收口项按总规划后置）
 >
 > 前置条件：Phase 0 的平台侧协议与持久化测试通过并提交；SteelMill 测试仓库可访问；具备一个可安全执行的 `api + smoke` 测试环境。
 >
 > 关联文档：[Phase 0：多项目接口自动化框架基线](phase0-多项目接口自动化框架基线.md)
 
-## 当前实施进度（2026-09-03）
+## 当前实施进度（2026-09-11）
+
+### 本次 P1 收口结论
+
+本阶段的 Runner、测试资产、质量门禁和本机受控 Flow 已完成并有实际证据。日常测试代码留在 `test/steelmill-api-automation` 分支，与后端 `main` 分离；后端更新后由测试分支按需同步 `origin/main`，再触发质量门禁。`main` 不承载这套测试资产，这是当前确认的分支治理策略。
+
+已完成的补充交付：
+
+- 在本机 `127.0.0.1:5010` 完成复杂现场作业 Flow 的真实受控执行：测试数据带 `E2E` 标识，资源创建、流转、逆序清理和 Redis 工艺位置恢复均有验证；不访问 `10.0.2.110` 的业务数据；
+- Flow 已按当前 TansuApi 的炉室/设备逻辑同步，覆盖物料创建、入炉、装炉、移炉、出炉等关键状态迁移；
+- ResourceLedger、清理补偿和 `resource_ledger.json` 脏数据证据已纳入执行链路；
+- 新增 PostgreSQL、Redis 与模拟器状态的统一观察时间线能力，使用只读查询；
+- 构建并验证 `steelmill-runner:0.1.0`，Docker 只读 Smoke 生成 JUnit、HTML、`result.json`、日志和 Manifest 证据；
+- 内部 Gitea Actions Runner `steelmill-windows-docker` 已注册并在线；测试分支上的 `Quality Gate` 已实际运行成功，完成隔离 Python 环境、Ruff、mypy、pytest/coverage、用例收集和质量证据上传；
+- 已提交审批式 `Approved Read-only Smoke`、`Approved Mutation Flow` 工作流和相应脚本，默认不因 push 访问 API、数据库或 Redis；
+- PAT 已删除。现有 Runner 注册继续使用，不作为 P1 阻塞项。
+
+### 明确后置项（不阻塞 P1）
+
+- `Approved Read-only Smoke` 与 `Approved Mutation Flow` 的 Gitea 页面手工触发及制品复验暂缓；工作流和密钥配置保留，后续具备稳定的人工触发方式时再执行；
+- Git 服务的 HTTP → HTTPS 迁移移至**全项目最终安全与发布收口**；
+- SteelMill 与 TestPilot 的版本号、Release Note、Git Tag、正式 Release 移至**全项目最终发布收口**；
+- Runner 注册 Token 轮换暂缓，当前在线 Runner 可继续使用；后续在安全窗口统一执行轮换和重新注册。
+
 
 已完成：
 

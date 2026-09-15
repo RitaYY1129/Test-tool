@@ -1,0 +1,9 @@
+schema_version: 1
+suites:
+  - id: flow
+    name: 完整 Flow
+    module: 现场作业
+    manifest: examples/smoke.json
+    description: 可清理写入
+    risk: mutation
+    approval_required: false
