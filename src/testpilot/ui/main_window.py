@@ -1648,16 +1648,20 @@ class MainWindow(QMainWindow):
         quick_hint.setObjectName("ValidationHint"); quick_hint.setWordWrap(True)
         self.auto_runner_environment = BelowPopupComboBox()
         self.auto_runner_suite = BelowPopupComboBox()
+        self.auto_runner_test_name = QLineEdit()
+        self.auto_runner_test_name.setPlaceholderText("\u4f8b\u5982\uff1a\u7089\u7a91\u72b6\u6001\u56de\u5f52\uff08\u5fc5\u586b\uff09")
+        self.auto_runner_test_name.setClearButtonEnabled(True)
         self.auto_runner_suite.addItem("只读 Smoke（两个 GET 核心接口）", "run-manifest.readonly-smoke.example.json")
         self.auto_runner_suite.addItem("离线 Unit（不访问服务）", "run-manifest.unit.example.json")
         self.auto_runner_status = QLabel(); self.auto_runner_status.setObjectName("ValidationHint"); self.auto_runner_status.setVisible(False)
         auto_run_btn = QPushButton("▶ 一键执行"); auto_run_btn.setProperty("primary", True); auto_run_btn.clicked.connect(self.run_registered_steelmill)
-        quick_layout.addWidget(quick_title, 0, 0, 1, 5); quick_layout.addWidget(quick_hint, 1, 0, 1, 5)
+        quick_layout.addWidget(quick_title, 0, 0, 1, 5)
         quick_form = QHBoxLayout(); quick_form.setSpacing(10)
         environment_field = QHBoxLayout(); environment_field.setSpacing(8); environment_field.addWidget(QLabel("环境")); environment_field.addWidget(self.auto_runner_environment, 1)
         suite_field = QHBoxLayout(); suite_field.setSpacing(8); suite_field.addWidget(QLabel("套件")); suite_field.addWidget(self.auto_runner_suite, 1)
         quick_form.addLayout(environment_field, 1); quick_form.addSpacing(28); quick_form.addLayout(suite_field, 1); quick_form.addSpacing(28); quick_form.addWidget(auto_run_btn)
-        quick_layout.addLayout(quick_form, 2, 0, 1, 5); quick_layout.addWidget(self.auto_runner_status, 3, 0, 1, 5)
+        test_name_field = QHBoxLayout(); test_name_field.setSpacing(8); test_name_field.addWidget(QLabel("\u6d4b\u8bd5\u540d\u79f0 *")); test_name_field.addWidget(self.auto_runner_test_name, 1)
+        quick_layout.addLayout(test_name_field, 1, 0, 1, 5); quick_layout.addLayout(quick_form, 2, 0, 1, 5)
 
         register_card = QFrame(); register_card.setObjectName("RunnerConfigCard")
         register_layout = QGridLayout(register_card)
@@ -1716,8 +1720,44 @@ class MainWindow(QMainWindow):
         self.runner_run_detail = QTextEdit(); self.runner_run_detail.setReadOnly(True); self.runner_run_detail.setObjectName("RunnerRunDetail")
         self.runner_run_detail.setPlaceholderText("选择一条任务后显示实际执行命令、Manifest、结果与产物目录。")
         detail_layout.addLayout(detail_header); detail_layout.addWidget(self.runner_run_detail)
-        layout.addWidget(title); layout.addWidget(note); layout.addWidget(self.runner_project_label); layout.addWidget(register_card)
-        layout.addWidget(quick_card); layout.addWidget(manual_card); layout.addWidget(self.runner_run_table, 1); layout.addWidget(detail_card, 1)
+        header = QHBoxLayout()
+        header.addWidget(title); header.addStretch()
+        self.runner_health_badge = QLabel("\u2022 Runner \u5df2\u767b\u8bb0")
+        self.runner_health_badge.setObjectName("RunnerHealthBadge")
+        header.addWidget(self.runner_health_badge)
+
+        create_tab = QWidget(); create_layout = QVBoxLayout(create_tab)
+        create_layout.setContentsMargins(0, 10, 0, 0); create_layout.setSpacing(12)
+        create_layout.addWidget(quick_card); create_layout.addWidget(register_card); create_layout.addStretch()
+
+        tasks_tab = QWidget(); tasks_layout = QVBoxLayout(tasks_tab)
+        tasks_layout.setContentsMargins(0, 10, 0, 0); tasks_layout.setSpacing(12)
+        tasks_layout.addWidget(manual_card); tasks_layout.addWidget(self.runner_run_table, 1); tasks_layout.addWidget(detail_card, 1)
+
+        catalog_tab = QWidget(); catalog_layout = QVBoxLayout(catalog_tab)
+        catalog_layout.setContentsMargins(0, 10, 0, 0); catalog_layout.setSpacing(12)
+        catalog_header = QHBoxLayout()
+        catalog_title = QLabel("\u6d4b\u8bd5\u5957\u4ef6\u76ee\u5f55"); catalog_title.setObjectName("PanelTitle")
+        catalog_refresh = QPushButton("\u5237\u65b0\u76ee\u5f55"); catalog_refresh.clicked.connect(self.refresh_external_runner_runs)
+        catalog_header.addWidget(catalog_title); catalog_header.addStretch(); catalog_header.addWidget(catalog_refresh)
+        catalog_layout.addLayout(catalog_header)
+        catalog_grid = QGridLayout(); catalog_grid.setHorizontalSpacing(14); catalog_grid.setVerticalSpacing(14)
+        for index in range(self.auto_runner_suite.count()):
+            suite_card = QFrame(); suite_card.setObjectName("RunnerSuiteCard")
+            suite_layout = QVBoxLayout(suite_card); suite_layout.setContentsMargins(18, 16, 18, 16); suite_layout.setSpacing(10)
+            suite_name = QLabel(self.auto_runner_suite.itemText(index)); suite_name.setObjectName("PanelTitle")
+            suite_scope = QLabel("\u5df2\u767b\u8bb0 Manifest \u6d4b\u8bd5\u5957\u4ef6"); suite_scope.setObjectName("RunnerSuiteMeta")
+            suite_action = QPushButton("\u521b\u5efa\u4efb\u52a1"); suite_action.setObjectName("RunnerSuiteAction")
+            suite_action.clicked.connect(lambda _=False, i=index: (self.auto_runner_suite.setCurrentIndex(i), self.runner_tabs.setCurrentIndex(0)))
+            suite_layout.addWidget(suite_name); suite_layout.addWidget(suite_scope); suite_layout.addStretch(); suite_layout.addWidget(suite_action)
+            catalog_grid.addWidget(suite_card, index // 2, index % 2)
+        catalog_layout.addLayout(catalog_grid); catalog_layout.addStretch()
+
+        self.runner_tabs = QTabWidget(); self.runner_tabs.setObjectName("RunnerTabs")
+        self.runner_tabs.addTab(create_tab, "\u521b\u5efa\u4efb\u52a1")
+        self.runner_tabs.addTab(tasks_tab, "\u4efb\u52a1\u4e0e\u7ed3\u679c")
+        self.runner_tabs.addTab(catalog_tab, "\u6d4b\u8bd5\u5957\u4ef6\u76ee\u5f55")
+        layout.addLayout(header); layout.addWidget(self.runner_project_label); layout.addWidget(self.runner_tabs, 1)
         self._finish_page(page, layout)
         layout.setContentsMargins(28, 16, 28, 16); layout.setSpacing(10)
         return page
@@ -1775,9 +1815,14 @@ class MainWindow(QMainWindow):
         completed automatically, so users never type a work order in daily use.
         """
         project_id = self._require_runner_project()
+
         if project_id is None:
             return
         runner = self.db.get_runner_by_name(project_id, "steelmill-runner")
+        test_name = self.auto_runner_test_name.text().strip()
+        if not test_name:
+            self.auto_runner_test_name.setFocus()
+            return
         if runner is None or not runner["enabled"]:
             QMessageBox.warning(self, "未配置 Runner", "请先在高级设置中保存并启用 steelmill-runner。"); return
         python_executable = Path(str(runner.get("command") or ""))
@@ -1809,7 +1854,12 @@ class MainWindow(QMainWindow):
             payload["run_id"] = run_id
             payload["environment_id"] = str(environment_name)
             payload["artifacts_dir"] = str(artifacts_dir)
-            payload.setdefault("metadata", {}).update({"requested_by": "TestPilot desktop", "suite": self.auto_runner_suite.currentText()})
+            payload.setdefault("metadata", {}).update({
+                "requested_by": "TestPilot desktop",
+                "suite": self.auto_runner_suite.currentText(),
+                "test_name": test_name,
+                "work_order": getattr(self, "runner_work_order", None).text().strip() if hasattr(self, "runner_work_order") else "",
+            })
             manifest_path = artifacts_dir / "platform-manifest.json"
             manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             platform_run_id = queue_external_run(self.db, payload)
@@ -2061,6 +2111,15 @@ class MainWindow(QMainWindow):
                 self.runner_enabled.setChecked(bool(registered.get("enabled")))
         rows = self.db.list_runner_runs(self.current_project_id) if self.current_project_id else []
         self._backfill_runner_reports(rows)
+        if hasattr(self, "runner_metrics"):
+            today = datetime.now().strftime("%Y-%m-%d")
+            terminal = [row for row in rows if str(row.get("status") or "") in {"passed", "failed", "error"}]
+            passed = sum(1 for row in terminal if row.get("status") == "passed")
+            self.runner_metrics["today"].setText(str(sum(1 for row in rows if str(row.get("created_at") or "").startswith(today))))
+            self.runner_metrics["pass_rate"].setText(f"{passed / len(terminal):.0%}" if terminal else "--")
+            self.runner_metrics["queued"].setText(str(sum(1 for row in rows if row.get("status") in {"queued", "running"})))
+            self.runner_metrics["latest"].setText(str(rows[0].get("status") or "--") if rows else "--")
+
         self._runner_run_rows = rows
         table = self.runner_run_table
         table.blockSignals(True); table.setRowCount(len(rows))
@@ -6280,3 +6339,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "没有 Runner 产物", "所选报告没有可打开的 Runner 产物目录。")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
+from .external_runner_modern import install as _install_external_runner_modern
+_install_external_runner_modern(MainWindow)

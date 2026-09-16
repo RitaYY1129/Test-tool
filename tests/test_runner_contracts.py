@@ -22,6 +22,10 @@ def _manifest() -> dict:
 
 def test_manifest_and_result_contract_reject_invalid_values() -> None:
     manifest = RunManifest.from_dict(_manifest())
+    named = _manifest()
+    named["metadata"] = {"test_name": "\u7089\u7a91\u72b6\u6001\u56de\u5f52"}
+    assert RunManifest.from_dict(named).to_dict()["metadata"]["test_name"] == "\u7089\u7a91\u72b6\u6001\u56de\u5f52"
+
     assert manifest.to_dict()["runner"]["name"] == "steelmill-runner"
 
     invalid = _manifest()

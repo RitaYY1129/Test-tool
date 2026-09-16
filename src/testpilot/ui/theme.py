@@ -1239,3 +1239,250 @@ def apply_theme(app) -> None:
         app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setStyle("Fusion")
     app.setStyleSheet(BLUE_WHITE_THEME)
+
+
+BLUE_WHITE_THEME += """
+/* External Runner real workspace: central content only */
+QWidget#RunnerWorkspace { background:#f4f8fc; }
+QLabel#RunnerPageTitle { color:#163b63; font-size:29px; font-weight:700; }
+QLabel#RunnerPageSubtitle { color:#718bab; font-size:14px; padding-bottom:2px; }
+QLabel#RunnerOnlineBadge { color:#138950; background:#def7e9; border-radius:14px; padding:6px 12px; font-weight:700; }
+QFrame#RunnerContextBar { background:#ffffff; border:1px solid #d7e4ef; border-left:5px solid #2788ed; border-radius:9px; }
+QLabel#RunnerContextStrong { color:#173e65; font-size:15px; font-weight:700; }
+QLabel#RunnerContextValue { color:#244c74; font-size:14px; }
+QLabel#RunnerContextDivider { color:#9ab0c4; font-size:14px; }
+QPushButton#RunnerGhostButton { min-height:34px; padding:0 13px; color:#2678cf; background:#ffffff; border:1px solid #c9dced; border-radius:6px; font-weight:700; }
+QPushButton#RunnerGhostButton:hover { background:#f0f7ff; border-color:#8ec0f3; }
+QTabWidget#RunnerCenterTabs::pane { background:transparent; border:none; top:-1px; }
+QTabWidget#RunnerCenterTabs QTabBar::tab { min-width:0; background:transparent; color:#7189a6; border:none; border-bottom:3px solid transparent; border-radius:0; padding:13px 19px; margin-right:12px; font-size:15px; }
+QTabWidget#RunnerCenterTabs QTabBar::tab:selected { background:transparent; color:#237ee4; border-bottom:3px solid #2587ee; font-weight:700; }
+QFrame#RunnerCreateCard, QFrame#RunnerPreviewCard, QFrame#RunnerResultCard, QFrame#RunnerCatalogCard { background:#ffffff; border:1px solid #d7e4ef; border-radius:11px; }
+QFrame#RunnerPreviewCard { background:#f8fbff; border-color:#d4e5f5; }
+QLabel#RunnerSectionTitle { color:#173e65; font-size:19px; font-weight:700; }
+QLabel#RunnerSectionHint { color:#7892ae; font-size:12px; }
+QLabel#RunnerSectionLabel, QLabel#RunnerFieldLabel { color:#294f77; font-weight:700; font-size:13px; }
+QLineEdit#RunnerSuiteSearch, QLineEdit#RunnerFilterInput { min-height:40px; border:1px solid #d2e0ed; border-radius:7px; padding:0 12px; }
+QFrame#RunnerSuiteChoice { background:#ffffff; border:1px solid #dde7f0; border-radius:8px; }
+QFrame#RunnerSuiteChoice:hover { background:#f6faff; border-color:#9bc6f4; }
+QPushButton#RunnerPrimaryAction, QPushButton#RunnerFilterAction { min-height:42px; color:white; background:#2784e8; border:1px solid #2784e8; border-radius:7px; font-weight:700; padding:0 16px; }
+QPushButton#RunnerSecondaryAction { min-height:42px; color:#2678cf; background:#ffffff; border:1px solid #9ec9f6; border-radius:7px; font-weight:700; }
+QWidget#RunnerPreviewRow { border-bottom:1px solid #e3ebf3; }
+QLabel#RunnerPreviewKey { color:#7892ae; font-size:11px; }
+QLabel#RunnerPreviewValue { color:#315778; font-size:13px; font-weight:700; }
+QFrame#RunnerMetricBlue, QFrame#RunnerMetricAmber { background:#ffffff; border:1px solid #d7e4ef; border-radius:11px; min-height:112px; }
+QLabel#RunnerMetricCaption { color:#7b92aa; font-size:13px; }
+QLabel#RunnerMetricValue { color:#173e65; font-size:28px; font-weight:700; }
+QFrame#RunnerMetricAmber QLabel#RunnerMetricValue { color:#bf7619; }
+QTableWidget#RunnerRunTable { background:#ffffff; border:none; gridline-color:#e7eef4; color:#365978; }
+QTableWidget#RunnerRunTable::item { padding:11px 9px; }
+QHeaderView::section { background:#f4f8fc; color:#6e88a5; padding:12px 9px; border:none; border-bottom:1px solid #e3ebf3; font-weight:700; }
+QPushButton#RunnerChip, QPushButton#RunnerActiveChip { min-height:38px; padding:0 14px; border:1px solid #d4e1ed; border-radius:19px; background:#ffffff; color:#5e7b98; }
+QPushButton#RunnerActiveChip { background:#edf6ff; border-color:#9fc9f6; color:#2378d1; font-weight:700; }
+QLabel#RunnerCatalogCount { color:#6986a3; background:#f1f6fc; border-radius:16px; padding:8px 12px; }
+QFrame#RunnerSuiteCard { background:#ffffff; border:1px solid #d8e5ef; border-radius:11px; min-height:174px; }
+QLabel#RunnerSuiteName { color:#163d65; font-size:16px; font-weight:700; }
+QPushButton#RunnerSuiteAction { text-align:left; border:none; background:transparent; color:#237bd6; font-weight:700; padding:3px 0; }
+"""
+
+BLUE_WHITE_THEME += """
+
+/* Resize-safe real Runner controls */
+QWidget#RunnerWorkspace QLineEdit, QWidget#RunnerWorkspace QComboBox {
+    min-height: 42px;
+    max-height: 42px;
+    padding: 0 12px;
+    font-size: 13px;
+}
+QFrame#RunnerSuiteChoice { min-height: 74px; }
+QFrame#RunnerAdvancedInline {
+    background: #ffffff;
+    border: 1px solid #d7e4ef;
+    border-radius: 10px;
+    margin: 0 0 2px 0;
+}
+QLabel#RunnerSuiteMeta { color:#6986a2; font-size:11px; }
+QScrollArea, QAbstractScrollArea { background: transparent; }
+
+"""
+
+BLUE_WHITE_THEME += """
+
+/* Prevent runner form distortion on window resize */
+QScrollArea#RunnerCreateScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#RunnerCreateScroll > QWidget > QWidget {
+    background: transparent;
+}
+QScrollArea#RunnerCreateScroll QScrollBar:vertical {
+    width: 10px;
+    margin: 3px;
+}
+QScrollArea#RunnerCreateScroll QScrollBar::handle:vertical {
+    background: #b9cce0;
+    border-radius: 5px;
+    min-height: 36px;
+}
+QFrame#RunnerCreateCard QLineEdit, QFrame#RunnerCreateCard QComboBox {
+    min-height: 44px;
+    max-height: 44px;
+}
+
+"""
+
+BLUE_WHITE_THEME += """
+
+/* Prototype-aligned live task table and scroll behavior */
+QScrollArea#RunnerCreateScroll QWidget#RunnerCreateCard,
+QScrollArea#RunnerCreateScroll QFrame#RunnerPreviewCard {
+    min-height: 0;
+}
+QTableWidget#RunnerRunTable {
+    border: none;
+    alternate-background-color: #ffffff;
+}
+QTableWidget#RunnerRunTable::item {
+    padding: 10px 9px;
+    border-bottom: 1px solid #e8eef4;
+}
+
+"""
+
+BLUE_WHITE_THEME += """
+
+/* Exact reference hierarchy for the real External Runner content */
+QFrame#RunnerReferenceForm, QFrame#RunnerReferencePreview, QFrame#RunnerResultCard, QFrame#RunnerCatalogCard { background:#fff; border:1px solid #d8e5ef; border-radius:12px; }
+QFrame#RunnerReferencePreview { background:#f7fbff; border-color:#d4e4f3; }
+QFrame#RunnerReferenceRule { min-height:1px; max-height:1px; border:none; background:#e6edf4; }
+QLabel#RunnerReferenceHeading { color:#153b63; font-size:20px; font-weight:700; }
+QLabel#RunnerReferenceSubheading { color:#7892ad; font-size:13px; }
+QLabel#RunnerReferenceCode { color:#9badbd; font-family:Consolas; font-size:11px; }
+QFrame#RunnerReferenceSuite { background:#fff; border:1px solid #dce6ef; border-radius:9px; }
+QFrame#RunnerReferenceSuite:hover { background:#f7fbff; border-color:#a8cef7; }
+QLabel#RunnerSuiteNumber { color:#7b98b5; min-width:24px; font-family:Consolas; }
+QLabel#RunnerSuiteReferenceName { color:#183e65; font-size:15px; font-weight:700; }
+QLabel#RunnerSuiteReferenceMeta { color:#7690aa; font-size:12px; }
+QRadioButton#RunnerReferenceRadio::indicator { width:18px; height:18px; border-radius:9px; border:1px solid #aec3d8; background:#fff; }
+QRadioButton#RunnerReferenceRadio::indicator:checked { border:5px solid #2784e9; }
+QFrame#RunnerReferenceCatalogCard { background:#fff; border:1px solid #d9e5ee; border-radius:11px; }
+QLabel#RunnerCatalogReferenceName { color:#153b63; font-size:17px; font-weight:700; }
+QLabel#RunnerCatalogReferenceDescription { color:#7991aa; font-size:12px; }
+QLabel#RunnerCatalogTag { color:#2378d4; background:#eaf3ff; border-radius:3px; padding:3px 6px; font-size:11px; }
+QPushButton#RunnerCatalogAction { color:#247ad2; border:none; background:transparent; text-align:left; font-weight:700; padding:3px 0; }
+
+"""
+
+BLUE_WHITE_THEME += """
+
+/* Exact tab navigation and controlled selection behavior for External Runner. */
+QTabWidget#RunnerCenterTabs QTabBar::tab {
+    min-height: 58px;
+    padding: 12px 18px;
+    margin-right: 20px;
+    color: #7188a4;
+    font-size: 16px;
+}
+QTabWidget#RunnerCenterTabs QTabBar::tab:selected {
+    color: #247fe6;
+    border-bottom: 4px solid #2b86ea;
+    font-weight: 700;
+}
+QComboBox#RunnerInputCombo QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #bcd8f2;
+    padding: 4px;
+    outline: none;
+    selection-background-color: #eef6ff;
+    selection-color: #193e65;
+}
+QComboBox#RunnerInputCombo QAbstractItemView::item {
+    min-height: 32px;
+    padding: 4px 10px;
+    border-radius: 5px;
+}
+QComboBox#RunnerInputCombo QAbstractItemView::item:selected,
+QComboBox#RunnerInputCombo QAbstractItemView::item:hover {
+    background: #eef6ff;
+    color: #1c70c6;
+}
+QRadioButton#RunnerReferenceRadio { min-width: 22px; max-width: 22px; min-height: 22px; max-height: 22px; }
+QRadioButton#RunnerReferenceRadio::indicator {
+    width: 18px; height: 18px; border-radius: 9px;
+    border: 1px solid #aec3d8; background: #ffffff;
+}
+QRadioButton#RunnerReferenceRadio::indicator:checked {
+    border: 5px solid #2784e9; background: #ffffff;
+}
+
+"""
+
+BLUE_WHITE_THEME += """
+QLabel#RunnerTabCount { min-width:22px; min-height:22px; border-radius:11px; padding:0 5px; color:#287ee0; background:#eaf3ff; font-size:12px; }
+QLabel#RunnerTabLive { min-height:24px; border-radius:12px; padding:0 8px; color:#2378d4; background:#eaf3ff; font-size:12px; font-weight:700; }
+"""
+BLUE_WHITE_THEME += """
+
+/* Reference execution-confirmation card and single-suite checked state. */
+QFrame#RunnerReferencePreview { background: #fbfdff; border-color: #cfe1f3; }
+QFrame#RunnerAssignedRunner { background:#effbf4; border:1px solid #c6efd9; border-radius:11px; }
+QLabel#RunnerAssignedDot { color:#31be76; font-size:22px; }
+QLabel#RunnerAssignedCaption { color:#669681; font-size:11px; letter-spacing:1.1px; }
+QLabel#RunnerAssignedName { color:#147d4d; font-size:16px; font-weight:700; }
+QLabel#RunnerAssignedVersion { color:#21805a; font-family:Consolas; font-size:14px; }
+QWidget#RunnerPreviewItem { border-bottom:1px solid #dce8f3; }
+QLabel#RunnerPreviewRisk { color:#c87427; font-size:16px; font-weight:700; }
+QLabel#RunnerPreviewNote { color:#8299b1; font-size:12px; padding:4px 0 10px; }
+QFrame#RunnerReferenceSuite[selected="true"] { background:#eff6ff; border:2px solid #2b84e9; }
+QFrame#RunnerReferenceSuite[selected="true"] QLabel#RunnerSuiteNumber { color:#2178d5; font-weight:700; }
+QPushButton#RunnerSuiteSelector {
+    min-width:28px; max-width:28px; min-height:28px; max-height:28px;
+    padding:0; border:1px solid #aec3d8; border-radius:14px;
+    background:#ffffff; color:transparent; font-size:16px; font-weight:800;
+}
+QPushButton#RunnerSuiteSelector:checked {
+    border:1px solid #2b84e9; background:#2b84e9; color:#ffffff;
+}
+QPushButton#RunnerSuiteSelector:hover { border-color:#2b84e9; }
+
+"""
+
+BLUE_WHITE_THEME += """
+QLabel#RunnerTableSuiteText { background:transparent; border:none; color:#355b7f; padding:0 9px; }
+"""
+BLUE_WHITE_THEME += """
+
+/* Clean white Runner surface, prototype information rows and readable table values. */
+QScrollArea#RunnerWorkspace, QScrollArea#RunnerWorkspace > QWidget > QWidget#RunnerWorkspaceContent,
+QScrollArea#RunnerTabScroll, QScrollArea#RunnerTabScroll > QWidget > QWidget { background:#ffffff; }
+QScrollArea#RunnerWorkspace { border:none; }
+QScrollArea#RunnerWorkspace QScrollBar:vertical { width:10px; margin:4px; }
+QScrollArea#RunnerWorkspace QScrollBar::handle:vertical { background:#b9cce0; border-radius:5px; min-height:42px; }
+QFrame#RunnerAssignedRunner { border:none; border-radius:0; background:#effbf4; }
+QFrame#RunnerAssignedRunner + QWidget { margin-top:0; }
+QLabel#RunnerTableSuiteText { background:transparent; border:none; color:#355b7f; padding:0 9px; }
+QLabel#RunnerStatusBadge { min-width:86px; max-width:126px; min-height:28px; }
+QFrame#RunnerReferenceForm, QFrame#RunnerReferencePreview, QFrame#RunnerResultCard,
+QFrame#RunnerCatalogCard, QFrame#RunnerMetricBlue, QFrame#RunnerMetricAmber { background:#ffffff; }
+
+"""
+BLUE_WHITE_THEME += """
+
+/* The Runner uses the same pale system canvas as the reference prototype. */
+QScrollArea#RunnerWorkspace, QScrollArea#RunnerWorkspace > QWidget > QWidget#RunnerWorkspaceContent { background:#f4f8fc; }
+QScrollArea#RunnerWorkspace QScrollBar:vertical, QScrollArea#RunnerWorkspace QScrollBar:horizontal { width:0; height:0; background:transparent; }
+QFrame#RunnerReferenceSuite { background:#ffffff; }
+
+"""
+BLUE_WHITE_THEME += """
+
+/* Runner tab pages inherit the reference system canvas—no nested grey panel. */
+QTabWidget#RunnerCenterTabs::pane,
+QTabWidget#RunnerCenterTabs QStackedWidget,
+QTabWidget#RunnerCenterTabs > QWidget { background:#f4f8fc; border:none; }
+QWidget#RunnerWorkspaceContent { background:#f4f8fc; }
+QWidget#RunnerTableActions { background:transparent; border:none; }
+QWidget#RunnerTableActions QToolButton { background:transparent; border:none; padding:3px; }
+QWidget#RunnerTableActions QToolButton:hover { background:#eaf3ff; border-radius:5px; }
+
+"""
