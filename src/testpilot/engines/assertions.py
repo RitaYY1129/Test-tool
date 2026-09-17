@@ -10,7 +10,13 @@ def evaluate(assertion: dict, status_code: int, elapsed_ms: int, body: Any) -> d
     passed = False
     if kind == "status_code":
         actual = status_code
-        passed = actual == expected
+        operator = assertion.get("operator", "equals")
+        if operator == "in":
+            passed = actual in (expected or [])
+        elif operator == "not_in":
+            passed = actual not in (expected or [])
+        else:
+            passed = actual == expected
     elif kind == "response_time":
         actual = elapsed_ms
         passed = actual < expected

@@ -1375,6 +1375,68 @@ QPushButton#RunnerCatalogAction { color:#247ad2; border:none; background:transpa
 
 BLUE_WHITE_THEME += """
 
+/* Runner navigation stays compact and visually anchored while pages switch. */
+QTabWidget#RunnerCenterTabs QTabBar {
+    background: transparent;
+}
+QTabWidget#RunnerCenterTabs QTabBar::tab {
+    min-height: 46px;
+    max-height: 46px;
+    padding: 0 18px;
+    margin-right: 14px;
+    border: none;
+    border-bottom: 3px solid transparent;
+    font-size: 17px;
+}
+QTabWidget#RunnerCenterTabs QTabBar::tab:selected {
+    border-bottom: 3px solid #2b86ea;
+}
+
+QFrame#RunnerDetailCard {
+    background: #f6faff;
+    border: 1px solid #cbdff2;
+    border-radius: 12px;
+}
+QFrame#RunnerDetailField {
+    background: #ffffff;
+    border: 1px solid #e0eaf3;
+    border-radius: 8px;
+}
+QFrame#RunnerDetailField:hover {
+    border-color: #bad6ef;
+    background: #fbfdff;
+}
+QLabel#RunnerDetailStatus {
+    font-size: 12px;
+}
+
+QDialog#RunnerSuiteDialog {
+    background: #f7faff;
+}
+QDialog#RunnerSuiteDialog QLabel#RunnerDetailTitle {
+    font-size: 19px;
+}
+QDialog#RunnerSuiteDialog QLineEdit,
+QDialog#RunnerSuiteDialog QComboBox,
+QDialog#RunnerSuiteDialog QSpinBox,
+QDialog#RunnerSuiteDialog QPlainTextEdit {
+    min-height: 38px;
+    color: #294b6b;
+    background: #ffffff;
+    border: 1px solid #cdddec;
+    border-radius: 7px;
+    padding: 0 10px;
+}
+QDialog#RunnerSuiteDialog QPlainTextEdit {
+    padding: 8px 10px;
+}
+QDialog#RunnerSuiteDialog QLineEdit:focus,
+QDialog#RunnerSuiteDialog QComboBox:focus,
+QDialog#RunnerSuiteDialog QSpinBox:focus,
+QDialog#RunnerSuiteDialog QPlainTextEdit:focus {
+    border-color: #65a6e9;
+}
+
 /* Exact tab navigation and controlled selection behavior for External Runner. */
 QTabWidget#RunnerCenterTabs QTabBar::tab {
     min-height: 58px;
@@ -1420,6 +1482,114 @@ QRadioButton#RunnerReferenceRadio::indicator:checked {
 BLUE_WHITE_THEME += """
 QLabel#RunnerTabCount { min-width:22px; min-height:22px; border-radius:11px; padding:0 5px; color:#287ee0; background:#eaf3ff; font-size:12px; }
 QLabel#RunnerTabLive { min-height:24px; border-radius:12px; padding:0 8px; color:#2378d4; background:#eaf3ff; font-size:12px; font-weight:700; }
+"""
+
+BLUE_WHITE_THEME += """
+
+/* External Runner interaction states and expandable task detail. */
+QLabel#RunnerResultsCount {
+    color: #718ba5;
+    font-size: 12px;
+}
+QLabel#RunnerSuiteSummary {
+    color: #617f9d;
+    background: #f4f8fc;
+    border: 1px solid #dfebf5;
+    border-radius: 7px;
+    padding: 10px 12px;
+}
+QFrame#RunnerDetailCard {
+    background: #f8fbff;
+    border: 1px solid #cfe0f0;
+    border-radius: 9px;
+}
+QLabel#RunnerDetailTitle {
+    color: #143f69;
+    font-size: 17px;
+    font-weight: 700;
+}
+QLabel#RunnerDetailLabel {
+    color: #7a91a8;
+    font-size: 11px;
+}
+QLabel#RunnerDetailValue {
+    color: #294f72;
+    font-size: 13px;
+    font-weight: 700;
+}
+QLabel#RunnerDetailError {
+    color: #bd543e;
+    background: #fff4f1;
+    border: 1px solid #f3d1c9;
+    border-radius: 6px;
+    padding: 9px 11px;
+}
+QTabWidget#RunnerDetailTabs::pane {
+    top: -1px;
+    background: #ffffff;
+    border: 1px solid #dbe7f1;
+    border-radius: 6px;
+}
+QTabWidget#RunnerDetailTabs QTabBar::tab {
+    min-height: 30px;
+    padding: 5px 14px;
+    margin-right: 4px;
+    color: #6683a0;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-size: 12px;
+}
+QTabWidget#RunnerDetailTabs QTabBar::tab:selected {
+    color: #247fe5;
+    border-bottom: 2px solid #2b86ea;
+    font-weight: 700;
+}
+QTabWidget#RunnerDetailTabs QPlainTextEdit {
+    color: #355573;
+    background: #ffffff;
+    border: none;
+    font-family: Consolas;
+    font-size: 11px;
+}
+QTextBrowser#RunnerReadableDetail {
+    color: #294f72;
+    background: #ffffff;
+    border: none;
+    padding: 4px 6px;
+}
+QToolButton[runnerBusy="true"], QPushButton[runnerBusy="true"] {
+    color: #6f8ca7;
+}
+QFrame#RunnerSuiteDetailCard {
+    background: #f8fbff;
+    border: 1px solid #cbdff2;
+    border-left: 4px solid #2b86ea;
+    border-radius: 9px;
+}
+QFrame#RunnerSuiteDetailCard QLineEdit[readOnly="true"],
+QFrame#RunnerSuiteDetailCard QSpinBox[readOnly="true"],
+QFrame#RunnerSuiteDetailCard QPlainTextEdit[readOnly="true"] {
+    color: #355a7b;
+    background: #f2f7fc;
+    border-color: #dce8f2;
+}
+QPlainTextEdit#RunnerSuiteDescriptionEditor {
+    color: #294b6b;
+    background: #ffffff;
+    border: 1px solid #cdddec;
+    border-radius: 7px;
+    padding: 8px 10px;
+    font-size: 13px;
+}
+QLabel#RunnerSuiteEditStatus {
+    color: #bf5742;
+    background: #fff3ef;
+    border: 1px solid #f2d1c8;
+    border-radius: 6px;
+    padding: 8px 10px;
+}
+
 """
 BLUE_WHITE_THEME += """
 
@@ -1862,5 +2032,58 @@ QPushButton#RunnerCatalogAction {
     font-weight: 700;
 }
 QPushButton#RunnerCatalogAction:hover { color: #145fae; }
+
+"""
+
+BLUE_WHITE_THEME += """
+
+/* Final Runner overrides: compact tabs, task-detail cards and suite dialog. */
+QTabWidget#RunnerCenterTabs QTabBar::tab {
+    min-height: 46px;
+    max-height: 46px;
+    padding: 0 18px;
+    margin-right: 14px;
+    border: none;
+    border-bottom: 3px solid transparent;
+    font-size: 17px;
+}
+QTabWidget#RunnerCenterTabs QTabBar::tab:selected {
+    border-bottom: 3px solid #2b86ea;
+}
+QFrame#RunnerDetailCard {
+    background: #f6faff;
+    border: 1px solid #cbdff2;
+    border-radius: 12px;
+}
+QFrame#RunnerDetailField {
+    background: #ffffff;
+    border: 1px solid #e0eaf3;
+    border-radius: 8px;
+}
+QFrame#RunnerDetailField:hover {
+    border-color: #bad6ef;
+    background: #fbfdff;
+}
+QLabel#RunnerDetailStatus { font-size: 12px; }
+QDialog#RunnerSuiteDialog { background: #f7faff; }
+QDialog#RunnerSuiteDialog QLabel#RunnerDetailTitle { font-size: 19px; }
+QDialog#RunnerSuiteDialog QLineEdit,
+QDialog#RunnerSuiteDialog QComboBox,
+QDialog#RunnerSuiteDialog QSpinBox,
+QDialog#RunnerSuiteDialog QPlainTextEdit {
+    min-height: 38px;
+    color: #294b6b;
+    background: #ffffff;
+    border: 1px solid #cdddec;
+    border-radius: 7px;
+    padding: 0 10px;
+}
+QDialog#RunnerSuiteDialog QPlainTextEdit { padding: 8px 10px; }
+QDialog#RunnerSuiteDialog QLineEdit:focus,
+QDialog#RunnerSuiteDialog QComboBox:focus,
+QDialog#RunnerSuiteDialog QSpinBox:focus,
+QDialog#RunnerSuiteDialog QPlainTextEdit:focus {
+    border-color: #65a6e9;
+}
 
 """

@@ -56,13 +56,19 @@ def run_cases(cases: list[dict], base_url: str, common_headers: dict | None = No
                 on_result(result)
             continue
         headers = resolve({**(common_headers or {}), **(request.get("headers") or {})}, runtime_variables)
+        disable_auth = bool(request.get("disable_auth"))
+        if disable_auth:
+            auth_header_names = {
+                "authorization", "proxy-authorization", "x-api-key", "api-key", "apikey", "token",
+            }
+            headers = {key: value for key, value in headers.items() if str(key).lower() not in auth_header_names}
         auth_type = str(runtime_variables.get("AUTH_TYPE", "")).lower()
-        if auth_type in {"bearer", "jwt"} and runtime_variables.get("TOKEN"):
+        if not disable_auth and auth_type in {"bearer", "jwt"} and runtime_variables.get("TOKEN"):
             headers.setdefault("Authorization", f"Bearer {runtime_variables['TOKEN']}")
-        elif auth_type == "basic":
+        elif not disable_auth and auth_type == "basic":
             raw = f"{runtime_variables.get('USERNAME','')}:{runtime_variables.get('PASSWORD','')}".encode()
             headers.setdefault("Authorization", "Basic " + base64.b64encode(raw).decode())
-        elif auth_type == "api_key" and runtime_variables.get("API_KEY"):
+        elif not disable_auth and auth_type == "api_key" and runtime_variables.get("API_KEY"):
             headers.setdefault(str(runtime_variables.get("API_KEY_HEADER", "X-API-Key")), runtime_variables["API_KEY"])
         query = resolve(copy.deepcopy(request.get("query") or {}), runtime_variables)
         path_values = resolve(copy.deepcopy(request.get("path_parameters") or {}), runtime_variables)

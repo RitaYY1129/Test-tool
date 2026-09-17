@@ -586,10 +586,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(sidebar)
         layout.addWidget(content_shell, 1)
         self.setCentralWidget(root)
+        self._optimize_scrolling()
         self.statusBar().showMessage("就绪")
         self._sidebar_collapsed = False
         self.ai_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         self.ai_shortcut.activated.connect(self.toggle_ai_assistant)
+
+    def _optimize_scrolling(self) -> None:
+        """Use pixel scrolling and bounded repaint steps for dense desktop pages."""
+        for view in self.findChildren(QAbstractItemView):
+            view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+            view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+            view.verticalScrollBar().setSingleStep(24)
+        for area in self.findChildren(QScrollArea):
+            area.verticalScrollBar().setSingleStep(28)
 
     def _add_sidebar_entry(self, text, page_index, item_icon):
         button = QPushButton(f"  {text}")
@@ -1857,6 +1867,7 @@ class MainWindow(QMainWindow):
             payload.setdefault("metadata", {}).update({
                 "requested_by": "TestPilot desktop",
                 "suite": self.auto_runner_suite.currentText(),
+                "module": self.runner_module.currentText() if hasattr(self, "runner_module") else "",
                 "test_name": test_name,
                 "work_order": getattr(self, "runner_work_order", None).text().strip() if hasattr(self, "runner_work_order") else "",
             })
@@ -1929,6 +1940,11 @@ class MainWindow(QMainWindow):
                 }
             elif result_path.is_file():
                 result = json.loads(result_path.read_text(encoding="utf-8"))
+                artifacts = result.setdefault("artifacts", {})
+                if not isinstance(artifacts, dict):
+                    raise ContractError("本地 Runner 的 result.json 中 artifacts 必须是对象")
+                # 旧版 Runner 未回写 root；该目录由平台创建，可安全补全后继续严格校验产物。
+                artifacts.setdefault("root", str(artifacts_dir))
                 validate_local_runner_artifacts(artifacts_dir, result)
             else:
                 result = {
@@ -1942,7 +1958,22 @@ class MainWindow(QMainWindow):
             final_status = str(result.get("status") or "error")
             self.auto_runner_status.setText(f"已自动归档：平台任务 #{platform_run_id} · {final_status}"); self.auto_runner_status.setVisible(True)
         except (OSError, ValueError, ContractError, json.JSONDecodeError) as exc:
-            self.auto_runner_status.setText(f"任务 #{platform_run_id} 归档失败：{exc}"); self.auto_runner_status.setVisible(True)
+            message = str(exc)
+            latest = self.db.get_runner_run(platform_run_id)
+            if latest is not None and latest.get("status") in {"queued", "running"}:
+                fallback = {
+                    "schema_version": "1.0", "run_id": latest["run_key"], "status": "error",
+                    "summary": {"total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0},
+                    "cases": [], "artifacts": {"root": str(artifacts_dir)},
+                    "error": f"结果归档校验失败：{message}",
+                }
+                try:
+                    complete_external_run(self.db, platform_run_id, fallback)
+                    self._archive_runner_report(platform_run_id, fallback)
+                except (OSError, ValueError, ContractError):
+                    pass
+            self.auto_runner_status.setText(f"任务 #{platform_run_id} 已结束，但结果归档校验失败：{message}")
+            self.auto_runner_status.setVisible(True)
         finally:
             self._external_runner_processes.pop(platform_run_id, None)
             timeout = self._external_runner_timeouts.pop(platform_run_id, None)
@@ -2467,12 +2498,12 @@ class MainWindow(QMainWindow):
         self.endpoint_project_label = QLabel("当前项目：未选择"); self.endpoint_project_label.setObjectName("ContextBanner")
         top_filters = QHBoxLayout(); top_filters.setSpacing(10)
         top_filters.addWidget(QLabel("测试项目"))
-        self.endpoint_project_selector = QComboBox(); self.endpoint_project_selector.currentIndexChanged.connect(self.select_endpoint_project)
+        self.endpoint_project_selector = BelowPopupComboBox(); self.endpoint_project_selector.currentIndexChanged.connect(self.select_endpoint_project)
         top_filters.addWidget(self.endpoint_project_selector, 1)
         self.search = QLineEdit(); self.search.setPlaceholderText("⌕  搜索接口名称、路径、方法")
         top_filters.addWidget(self.search, 2)
-        self.source_filter = QComboBox(); self.source_filter.addItem("全部资料源", None)
-        self.module_filter = QComboBox(); self.module_filter.addItem("全部模块", None)
+        self.source_filter = BelowPopupComboBox(); self.source_filter.addItem("全部资料源", None)
+        self.module_filter = BelowPopupComboBox(); self.module_filter.addItem("全部模块", None)
         self.source_filter.currentIndexChanged.connect(self.refresh_endpoints)
         self.module_filter.currentIndexChanged.connect(self.refresh_endpoints)
         top_filters.addWidget(self.source_filter, 1)
@@ -2486,6 +2517,9 @@ class MainWindow(QMainWindow):
         add_group = QPushButton("▦"); add_group.setToolTip("模块按接口导入数据自动生成")
         group_header.addWidget(group_title); group_header.addStretch(); group_header.addWidget(add_group)
         self.endpoint_tree = QTreeWidget(); self.endpoint_tree.setObjectName("EndpointNavigator"); self.endpoint_tree.setHeaderHidden(True)
+        self.endpoint_tree.setUniformRowHeights(True)
+        self.endpoint_tree.setAnimated(False)
+        self.endpoint_tree.setItemDelegate(EndpointTreeDelegate(self.endpoint_tree))
         self.endpoint_tree.itemClicked.connect(self.select_endpoint_tree_item)
         add_endpoint = QPushButton("＋ 新建分组接口"); add_endpoint.clicked.connect(self.add_endpoint)
         group_layout.addLayout(group_header); group_layout.addWidget(self.endpoint_tree, 1); group_layout.addWidget(add_endpoint)
@@ -2501,9 +2535,9 @@ class MainWindow(QMainWindow):
         request_layout = QVBoxLayout(request_card); request_layout.setContentsMargins(14, 12, 14, 12); request_layout.setSpacing(8)
         request_header = QHBoxLayout(); request_title = QLabel("调试接口"); request_title.setObjectName("PanelTitle")
         self.endpoint_active_label = QLabel("选择左侧接口开始调试"); self.endpoint_active_label.setObjectName("EndpointActiveTab")
-        environment_selector = QComboBox(); environment_selector.addItem("开发环境（使用已保存环境）")
+        environment_selector = BelowPopupComboBox(); environment_selector.addItem("开发环境（使用已保存环境）")
         request_header.addWidget(request_title); request_header.addWidget(self.endpoint_active_label, 1); request_header.addWidget(environment_selector)
-        request_url_row = QHBoxLayout(); self.method = QComboBox(); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+        request_url_row = QHBoxLayout(); self.method = BelowPopupComboBox(); self.method.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
         self.endpoint_url = QLineEdit(); self.endpoint_url.setReadOnly(True); self.endpoint_url.setPlaceholderText("选择接口后显示完整请求地址")
         send = QPushButton("发送"); send.setProperty("primary", True); send.clicked.connect(self.send_request)
         request_url_row.addWidget(self.method); request_url_row.addWidget(self.endpoint_url, 1); request_url_row.addWidget(send)
@@ -3423,7 +3457,10 @@ class MainWindow(QMainWindow):
         if self.projects.count():
             index = self.projects.findData(selected)
             self.projects.setCurrentIndex(max(0, index))
-            self._project_changed()
+            # 多数保存操作只需要刷新当前表格；同一项目反复全量重建接口树、
+            # 用例、报告和流程会造成明显卡顿。
+            if self.projects.currentData() != self.current_project_id:
+                self._project_changed()
             if self.project_table.currentRow() < 0:
                 self.project_table.selectRow(max(0, self.projects.currentIndex()))
         else:
@@ -5056,7 +5093,17 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "endpoint_tree"):
             return
         tree = self.endpoint_tree
-        tree.blockSignals(True); tree.clear()
+        expanded_modules: set[str] = set()
+        if tree.topLevelItemCount():
+            previous_workspace = tree.topLevelItem(0)
+            if previous_workspace and previous_workspace.childCount():
+                previous_root = previous_workspace.child(0)
+                for index in range(previous_root.childCount()):
+                    previous_item = previous_root.child(index)
+                    data = previous_item.data(0, Qt.UserRole)
+                    if previous_item.isExpanded() and isinstance(data, dict) and data.get("module"):
+                        expanded_modules.add(str(data["module"]))
+        tree.setUpdatesEnabled(False); tree.blockSignals(True); tree.clear()
         try:
             workspace_root = QTreeWidgetItem(tree, ["默认模块"])
             workspace_root.setIcon(0, self.style().standardIcon(QStyle.SP_DirHomeIcon))
@@ -5073,22 +5120,16 @@ class MainWindow(QMainWindow):
                 module_item.setData(0, Qt.UserRole, {"kind": "module", "module": module})
                 for row in module_rows:
                     method = str(row["method"]).upper()
-                    endpoint_item = QTreeWidgetItem(module_item, [""])
+                    endpoint_item = QTreeWidgetItem(
+                        module_item, [f"{method}  {str(row.get('summary') or row['path'])}"]
+                    )
                     endpoint_item.setSizeHint(0, QSize(0, 30))
                     endpoint_item.setData(0, Qt.UserRole, {"kind": "endpoint", "id": row["id"]})
-                    endpoint_line = QWidget(tree); endpoint_line.setObjectName("EndpointTreeLeaf")
-                    endpoint_line.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                    endpoint_layout = QHBoxLayout(endpoint_line); endpoint_layout.setContentsMargins(0, 0, 0, 0); endpoint_layout.setSpacing(6)
-                    method_label = QLabel(method); method_label.setObjectName("EndpointTreeMethod")
-                    method_label.setStyleSheet(f"color: {HttpMethodItemDelegate.COLORS.get(method, '#1677e8')};")
-                    name_label = QLabel(str(row.get("summary") or row["path"])); name_label.setObjectName("EndpointTreeName")
-                    endpoint_layout.addWidget(method_label); endpoint_layout.addWidget(name_label); endpoint_layout.addStretch()
-                    tree.setItemWidget(endpoint_item, 0, endpoint_line)
+                module_item.setExpanded(module in expanded_modules)
             workspace_root.setExpanded(True); root.setExpanded(True)
-            for index in range(root.childCount()):
-                root.child(index).setExpanded(True)
         finally:
             tree.blockSignals(False)
+            tree.setUpdatesEnabled(True)
 
     def select_endpoint_tree_item(self, item: QTreeWidgetItem, _column: int) -> None:
         data = item.data(0, Qt.UserRole) or {}
@@ -5500,12 +5541,10 @@ class MainWindow(QMainWindow):
         responses = data.get("responses") or {}
         security = data.get("security") or []
         parameter_lines = [
-            f"- {item.get('name', '未命名')}  ·  {item.get('in', 'query')}  ·  {'必填' if item.get('required') else '可选'}"
+            f"- {item.get('name', '未命名')}  ·  {item.get('location') or item.get('in', 'query')}  ·  {'必填' if item.get('required') else '可选'}"
             for item in parameters if isinstance(item, dict)
         ]
-        request_example = request_body.get("example") if isinstance(request_body, dict) else None
-        if request_example is None and isinstance(request_body, dict):
-            request_example = request_body.get("examples")
+        request_example = self._endpoint_body_example(request_body)
         detail = [
             f"{data.get('method', stored['method'])}  {data.get('path', stored['path'])}",
             "",
@@ -5538,9 +5577,7 @@ class MainWindow(QMainWindow):
         base_url = str(environments[0].get("base_url") or "") if environments else ""
         full_url = f"{base_url.rstrip('/')}{path}" if base_url else path
         self.endpoint_url.setText(full_url)
-        request_example = request_body.get("example") if isinstance(request_body, dict) else None
-        if request_example is None and isinstance(request_body, dict):
-            request_example = request_body.get("examples")
+        request_example = self._endpoint_body_example(request_body)
         if not isinstance(request_example, (dict, list)):
             request_example = {}
         self.body.setPlainText(json.dumps(request_example, ensure_ascii=False, indent=2))
@@ -5988,6 +6025,10 @@ class MainWindow(QMainWindow):
         if not endpoints:
             QMessageBox.information(self, "提示", "请先导入接口")
             return
+        instruction = self.instruction.toPlainText().strip()
+        rule_cases = generate_cases(endpoints, instruction)
+        plan = generate_plan(endpoints, instruction, rule_cases)
+        warning = ""
         mode = self.ai_tabs.currentIndex()
         if mode in {0, 1, 2}:
             try:
@@ -6016,21 +6057,35 @@ class MainWindow(QMainWindow):
                         self.ollama_model.text().strip(),
                     )
                 prompt = json.dumps(
-                    {"instruction": self.instruction.toPlainText(),
+                    {"instruction": instruction, "deterministic_plan": plan,
                      "endpoints": [json.loads(x["definition_json"]) for x in endpoints]},
                     ensure_ascii=False,
                 )
                 generated = provider.generate_structured(
-                    "你是接口测试设计器。只基于给定接口生成结构化测试计划和草稿用例，不执行请求。",
+                    "你是接口测试设计器。只基于给定接口 Schema 和用户输入的测试方向生成草稿用例，不执行请求，"
+                    "不得杜撰路径或字段。应覆盖适用的正向、负向、边界值与安全性场景；"
+                    "负向用例使用接口实际约束，破坏性与安全性用例必须保持 draft。",
                     prompt, TEST_GENERATION_SCHEMA,
                 )
                 validate_generation(generated, {f'{x["method"]} {x["path"]}' for x in endpoints})
-                cases = generated["cases"]
+                cases = list(generated["cases"])
+                existing = {
+                    (case.get("name"), case.get("request", {}).get("method"), case.get("request", {}).get("path"))
+                    for case in cases
+                }
+                cases.extend(
+                    case for case in rule_cases
+                    if (case.get("name"), case["request"].get("method"), case["request"].get("path")) not in existing
+                )
             except Exception as exc:
-                QMessageBox.critical(self, "模型生成失败", str(exc)); return
+                cases = rule_cases
+                warning = f"\nAI 生成暂不可用，已自动改用本地 Schema 规则：{exc}"
         self.db.save_test_cases(self.current_project_id, cases)
         self.refresh_projects(); self.refresh_cases(); self.go_to_page(3)
-        self.run_output.setPlainText(f"已生成 {len(cases)} 条草稿用例，请检查后确认。")
+        self.run_output.setPlainText(
+            f"已按输入方向生成 {len(cases)} 条草稿用例，请检查后确认。"
+            f"\n覆盖方向：{'；'.join(plan['test_types']) or '正向功能'}{warning}"
+        )
 
     def refresh_cases(self):
         rows = self.db.list_test_cases(self.current_project_id) if self.current_project_id else []
