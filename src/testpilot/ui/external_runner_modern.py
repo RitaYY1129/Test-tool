@@ -336,6 +336,19 @@ def _execution_content_text(record: dict) -> str:
         f"执行结果：共 {summary.get('total', 0)} 项，通过 {summary.get('passed', 0)} 项，"
         f"失败 {summary.get('failed', 0)} 项，异常 {summary.get('error', 0)} 项",
     ]
+    error = str(result.get("error") or "").strip()
+    if error:
+        lines.append(f"失败原因：{error}")
+    result_metadata = result.get("metadata") or {}
+    source_items = [
+        ("Git SHA", result_metadata.get("git_sha")),
+        ("CI 任务", result_metadata.get("ci_job_url")),
+        ("CI Job ID", result_metadata.get("ci_job_id")),
+        ("执行节点", result_metadata.get("runner_host")),
+    ]
+    source_text = "；".join(f"{label}：{value}" for label, value in source_items if value)
+    if source_text:
+        lines.append(f"执行来源：{source_text}")
     root = _runner_artifacts_root(record)
     log_path = root / "runner.log" if root is not None else None
     if log_path is not None and log_path.is_file():

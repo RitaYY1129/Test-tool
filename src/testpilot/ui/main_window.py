@@ -31,7 +31,10 @@ from testpilot.engines.ai_dialogue import ControlledDialogue
 from testpilot.engines.database_observer import inspect_sqlite_database
 from testpilot.engines.database_adapters import create_database_adapter
 from testpilot.engines.runtime_trace import TraceCollector
-from testpilot.engines.external_runner import complete_external_run, queue_external_run, validate_local_runner_artifacts
+from testpilot.engines.external_runner import (
+    complete_external_run, queue_external_run, validate_local_runner_artifacts,
+    write_runner_error_evidence,
+)
 from testpilot.contracts.runner import ContractError
 from testpilot.reports.difference import build_combined_difference, generate_difference_report
 from testpilot.engines.replay_package import export_replay_package
@@ -1932,12 +1935,10 @@ class MainWindow(QMainWindow):
         result_path = artifacts_dir / "result.json"
         try:
             if platform_run_id in self._external_runner_timed_out:
-                result = {
-                    "schema_version": "1.0", "run_id": stored["run_key"], "status": "error",
-                    "summary": {"total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0},
-                    "cases": [], "artifacts": {"root": str(artifacts_dir)},
-                    "error": "Runner 超过 Manifest policy.timeout_seconds，已由平台停止",
-                }
+                result = write_runner_error_evidence(
+                    artifacts_dir, stored["run_key"],
+                    "Runner 超过 Manifest policy.timeout_seconds，已由平台停止",
+                )
             elif result_path.is_file():
                 result = json.loads(result_path.read_text(encoding="utf-8"))
                 artifacts = result.setdefault("artifacts", {})
@@ -1947,12 +1948,10 @@ class MainWindow(QMainWindow):
                 artifacts.setdefault("root", str(artifacts_dir))
                 validate_local_runner_artifacts(artifacts_dir, result)
             else:
-                result = {
-                    "schema_version": "1.0", "run_id": stored["run_key"], "status": "error",
-                    "summary": {"total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0},
-                    "cases": [], "artifacts": {"root": str(artifacts_dir)},
-                    "error": f"Runner 未生成 result.json，进程退出码：{exit_code}",
-                }
+                result = write_runner_error_evidence(
+                    artifacts_dir, stored["run_key"],
+                    f"Runner 未生成 result.json，进程退出码：{exit_code}",
+                )
             complete_external_run(self.db, platform_run_id, result)
             self._archive_runner_report(platform_run_id, result)
             final_status = str(result.get("status") or "error")
@@ -1961,12 +1960,9 @@ class MainWindow(QMainWindow):
             message = str(exc)
             latest = self.db.get_runner_run(platform_run_id)
             if latest is not None and latest.get("status") in {"queued", "running"}:
-                fallback = {
-                    "schema_version": "1.0", "run_id": latest["run_key"], "status": "error",
-                    "summary": {"total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0},
-                    "cases": [], "artifacts": {"root": str(artifacts_dir)},
-                    "error": f"结果归档校验失败：{message}",
-                }
+                fallback = write_runner_error_evidence(
+                    artifacts_dir, latest["run_key"], f"结果归档校验失败：{message}"
+                )
                 try:
                     complete_external_run(self.db, platform_run_id, fallback)
                     self._archive_runner_report(platform_run_id, fallback)

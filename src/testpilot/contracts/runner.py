@@ -132,6 +132,8 @@ class RunResult:
     started_at: str = ""
     finished_at: str = ""
     schema_version: str = SCHEMA_VERSION
+    metadata: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "RunResult":
@@ -158,11 +160,17 @@ class RunResult:
         artifacts = raw.get("artifacts", {})
         if not isinstance(artifacts, Mapping) or not all(isinstance(key, str) and isinstance(value, str) for key, value in artifacts.items()):
             raise ContractError("artifacts 必须是字符串路径对象")
+        metadata = raw.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise ContractError("metadata 必须是对象")
+        error = raw.get("error")
+        if error is not None and not isinstance(error, str):
+            raise ContractError("error 必须是字符串或 null")
         return cls(
             run_id=_required_text(raw, "run_id"), status=status, summary=counts,
             cases=tuple(dict(item) for item in cases), artifacts=dict(artifacts),
             started_at=str(raw.get("started_at") or ""), finished_at=str(raw.get("finished_at") or ""),
-            schema_version=version,
+            schema_version=version, metadata=dict(metadata), error=error,
         )
 
     @classmethod
@@ -175,4 +183,5 @@ class RunResult:
             "schema_version": self.schema_version, "run_id": self.run_id, "status": self.status,
             "started_at": self.started_at, "finished_at": self.finished_at,
             "summary": self.summary, "cases": list(self.cases), "artifacts": self.artifacts,
+            "metadata": self.metadata, "error": self.error,
         }

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from html import escape
+from ipaddress import ip_address
+import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 from testpilot.contracts.runner import ContractError, RunManifest, RunResult
 from testpilot.storage.database import Database
@@ -11,6 +16,52 @@ REQUIRED_LOCAL_ARTIFACTS = {
     "html": "report.html",
     "log": "runner.log",
 }
+
+
+def is_loopback_base_url(value: object) -> bool:
+    """Return whether an environment URL is explicitly bound to this host."""
+    try:
+        parsed = urlparse(str(value or "").strip())
+        host = (parsed.hostname or "").strip().lower()
+        if parsed.scheme not in {"http", "https"} or not host:
+            return False
+        return host == "localhost" or ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def write_runner_error_evidence(artifacts_root: Path, run_id: str, message: str) -> dict:
+    """Persist the minimum evidence set when a Runner cannot create its own result."""
+    root = artifacts_root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).isoformat(timespec="seconds")
+    safe_message = escape(message)
+    artifacts = {
+        "root": str(root), "junit": "junit.xml", "html": "report.html",
+        "log": "runner.log", "runner_log": "runner.log",
+    }
+    result = {
+        "schema_version": "1.0", "run_id": run_id, "status": "error",
+        "started_at": timestamp, "finished_at": timestamp,
+        "summary": {"total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0},
+        "cases": [], "artifacts": artifacts, "error": message,
+        "metadata": {"failure_phase": "initialization"},
+    }
+    (root / "runner.log").write_text(f"[{timestamp}] {message}\n", encoding="utf-8")
+    (root / "junit.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<testsuite name="external-runner" tests="1" errors="1" time="0">'
+        f'<testcase classname="runner" name="initialization"><error message="{safe_message}" />'
+        '</testcase></testsuite>\n', encoding="utf-8"
+    )
+    (root / "report.html").write_text(
+        '<!doctype html><meta charset="utf-8"><title>Runner 初始化失败</title>'
+        f'<h1>Runner 初始化失败</h1><pre>{safe_message}</pre>', encoding="utf-8"
+    )
+    (root / "result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return result
 
 
 def validate_local_runner_artifacts(artifacts_root: Path, result_payload: dict) -> None:
@@ -78,6 +129,8 @@ def queue_external_run(db: Database, manifest_payload: dict) -> int:
         raise ContractError("选中了 mutation 套件，但 Manifest 未显式允许 mutation")
     if manifest.policy.allow_mutation and not environment["capabilities"].get("allow_mutation", False):
         raise ContractError(f"环境 {manifest.environment_id} 不允许 mutation 执行")
+    if manifest.policy.allow_mutation and not is_loopback_base_url(environment.get("base_url")):
+        raise ContractError("mutation 套件只能在 localhost 或 127.0.0.0/8 环回测试环境执行")
     return db.create_runner_run(int(runner["project_id"]), int(runner["id"]), manifest.to_dict())
 
 

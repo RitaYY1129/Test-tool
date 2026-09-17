@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from testpilot.contracts.runner import ContractError, RunManifest, RunResult
-from testpilot.engines.external_runner import complete_external_run, queue_external_run, validate_local_runner_artifacts
+from testpilot.engines.external_runner import (
+    complete_external_run, is_loopback_base_url, queue_external_run,
+    validate_local_runner_artifacts, write_runner_error_evidence,
+)
 from testpilot.storage.database import Database
 
 
@@ -40,6 +43,10 @@ def test_manifest_and_result_contract_reject_invalid_values() -> None:
         "artifacts": {"html": "report.html", "junit": "junit.xml"},
     })
     assert result.summary["passed"] == 1
+
+    enriched = RunResult.from_dict({**result.to_dict(), "error": "受控失败", "metadata": {"git_sha": "abc123"}})
+    assert enriched.to_dict()["error"] == "受控失败"
+    assert enriched.to_dict()["metadata"]["git_sha"] == "abc123"
 
 
 def test_platform_persists_project_adapter_runner_and_external_result(tmp_path) -> None:
@@ -120,3 +127,41 @@ def test_local_runner_artifacts_stay_in_platform_directory(tmp_path) -> None:
     payload["artifacts"]["html"] = "../outside.html"
     with pytest.raises(ContractError, match="受控目录"):
         validate_local_runner_artifacts(artifacts, payload)
+
+
+def test_mutation_only_accepts_loopback_environment(tmp_path) -> None:
+    assert is_loopback_base_url("http://127.0.0.1:5010")
+    assert is_loopback_base_url("http://localhost:5010")
+    assert is_loopback_base_url("http://[::1]:5010")
+    assert not is_loopback_base_url("https://staging.example.test")
+
+    db = Database(tmp_path / "mutation.db")
+    project_id = db.create_project("SteelMill")
+    db.save_project_adapter(project_id, "steelmill", {})
+    db.save_runner(project_id, "steelmill-runner", version="0.1.0")
+    manifest = _manifest()
+    manifest["selection"]["markers"] = ["mutation"]
+    manifest["policy"]["allow_mutation"] = True
+    db.save_environment(
+        project_id, "staging", "https://staging.example.test", {},
+        capabilities={"allow_mutation": True},
+    )
+    with pytest.raises(ContractError, match="环回测试环境"):
+        queue_external_run(db, manifest)
+
+    db.save_environment(
+        project_id, "staging", "http://127.0.0.1:5010", {},
+        capabilities={"allow_mutation": True},
+    )
+    assert queue_external_run(db, manifest) > 0
+
+
+def test_runner_initialization_error_writes_complete_evidence(tmp_path) -> None:
+    artifacts = tmp_path / "failed_run"
+    result = write_runner_error_evidence(artifacts, "run_failed", "启动失败 <unsafe>")
+    assert result["status"] == "error"
+    assert result["metadata"]["failure_phase"] == "initialization"
+    for filename in ("result.json", "junit.xml", "report.html", "runner.log"):
+        assert (artifacts / filename).is_file()
+    validate_local_runner_artifacts(artifacts, result)
+    assert "&lt;unsafe&gt;" in (artifacts / "report.html").read_text(encoding="utf-8")
